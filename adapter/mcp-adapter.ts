@@ -10,6 +10,7 @@ import { dirname, resolve } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { parseArgs } from "node:util";
 import { AgentTalkServer } from "./management.ts";
+import { approvePairing, type PairingRequest } from "../portal/pairing.ts";
 import { GroupRuntime, registerGroupTools, type GroupStore } from "./groups.ts";
 import { asGroupOp, groupHttpAction, isGroupCapacityRejection } from "../src/group-protocol.ts";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -21,6 +22,7 @@ import {
   openEnvelope,
   sealDirect,
   sealEnvelope,
+  sealOwnerCopy,
   signInvite,
   signRequest,
   verifyInvite,
@@ -83,6 +85,10 @@ type AdapterState = {
   outbox?: Record<string, SentMessage>;
   replacements?: Record<string, Replacement>;
   blocked?: Record<string, string | true>;
+  ownerDevices?: Record<string, PairingRequest>;
+  ownerCopies?: Record<string, CipherEnvelope>;
+  ownerGrants?: Record<string, { portal: string; expiresAt: number }>;
+  ownerQueue?: Record<string, { deviceId: string; senderId: string; messageId: string }>;
 };
 
 function result(value: unknown) {
@@ -135,6 +141,8 @@ class LocalAdapter {
   private pending: Promise<void> = Promise.resolve();
   private stopped = false;
   private backoff = 500;
+  private flushingOwnerCopies = false;
+  private ownerFlushRequested = false;
 
   readonly groups: GroupRuntime;
   constructor(
@@ -360,6 +368,7 @@ class LocalAdapter {
       socket.on("open", () => {
         this.backoff = 500;
         socket.send(JSON.stringify({ type: "resume" }));
+        void this.flushOwnerCopies().catch(() => {});
         if (this.state.groups) void this.groups.sync().catch(() => socket.close(1011));
       });
       socket.on("message", (data) => {
@@ -418,10 +427,12 @@ class LocalAdapter {
         receivedAt: Date.now(),
         ...(direct && { direct }),
       });
+      this.queueOwnerCopies(next, envelope.senderId, envelope.id);
       await this.save(next);
     }
     if (socket.readyState === WebSocket.OPEN)
       socket.send(JSON.stringify({ type: "ack", senderId: envelope.senderId, id: envelope.id }));
+    void this.flushOwnerCopies().catch(() => {});
   }
 
   async exportInvite(displayName: string, expiresInMinutes: number): Promise<Invite> {
@@ -736,7 +747,9 @@ class LocalAdapter {
     const next = structuredClone(this.state);
     delete next.outbox![id].pending;
     next.outbox![id].status = "submitted";
+    this.queueOwnerCopies(next, this.state.identity.agentId, id);
     await this.save(next);
+    void this.flushOwnerCopies().catch(() => {});
     return receipt;
   }
 
@@ -814,6 +827,160 @@ class LocalAdapter {
       ...direct,
     }));
   }
+  async approveOwnerDevice(request: PairingRequest) {
+    const current = this.state.ownerDevices?.[request.device.agentId];
+    if (current && JSON.stringify(current.device) !== JSON.stringify(request.device)) {
+      throw new Error("A changed device key requires a fresh device identity.");
+    }
+    const approval = await approvePairing(request, this.state.identity);
+    const next = structuredClone(this.state);
+    (next.ownerDevices ??= {})[request.device.agentId] = request;
+    delete next.ownerGrants?.[request.device.agentId];
+    for (const [key, queued] of Object.entries(next.ownerQueue ?? {})) {
+      if (queued.deviceId === request.device.agentId) delete next.ownerQueue?.[key];
+    }
+    await this.save(next);
+    return approval;
+  }
+
+  private queueOwnerCopies(state: AdapterState, senderId: string, messageId: string) {
+    for (const [deviceId, grant] of Object.entries(state.ownerGrants ?? {})) {
+      if (grant.expiresAt <= Date.now() || !state.ownerDevices?.[deviceId]) continue;
+      const key = JSON.stringify([deviceId, senderId, messageId]);
+      (state.ownerQueue ??= {})[key] = { deviceId, senderId, messageId };
+    }
+  }
+
+  async enableOwnerDevice(deviceId: string, portal: string, expiresAt: number) {
+    const url = new URL(portal);
+    const local = url.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
+    if ((!local && url.protocol !== "https:") || url.username || url.password ||
+        url.pathname !== "/" || url.search || url.hash) throw new Error("Expected a portal origin.");
+    if (!this.state.ownerDevices?.[deviceId]) throw new Error("Unknown approved device.");
+    const next = structuredClone(this.state);
+    (next.ownerGrants ??= {})[deviceId] = { portal: url.origin, expiresAt };
+    await this.save(next);
+  }
+
+  async backfillOwnerThread(deviceId: string, peerId: string, threadId: string) {
+    const grant = this.state.ownerGrants?.[deviceId];
+    if (!grant || grant.expiresAt <= Date.now()) throw new Error("The device has no active grant.");
+    const next = structuredClone(this.state);
+    let count = 0;
+    for (const message of next.inbox) {
+      if (message.senderId !== peerId || message.direct?.threadId !== threadId) continue;
+      const key = JSON.stringify([deviceId, message.senderId, message.id]);
+      (next.ownerQueue ??= {})[key] = { deviceId, senderId: message.senderId, messageId: message.id };
+      count++;
+    }
+    for (const message of Object.values(next.outbox ?? {})) {
+      if (message.recipientId !== peerId || message.direct?.threadId !== threadId || message.status !== "submitted") continue;
+      const senderId = next.identity.agentId;
+      const key = JSON.stringify([deviceId, senderId, message.id]);
+      (next.ownerQueue ??= {})[key] = { deviceId, senderId, messageId: message.id };
+      count++;
+    }
+    await this.save(next);
+    return count;
+  }
+
+  async flushOwnerCopies() {
+    if (this.stopped) return;
+    if (this.flushingOwnerCopies) {
+      this.ownerFlushRequested = true;
+      return;
+    }
+    this.flushingOwnerCopies = true;
+    try {
+      for (const [key, item] of Object.entries(this.state.ownerQueue ?? {})) {
+        const grant = this.state.ownerGrants?.[item.deviceId];
+        if (!grant || grant.expiresAt <= Date.now()) {
+          await this.serialize(async () => {
+            const next = structuredClone(this.state);
+            delete next.ownerQueue?.[key];
+            await this.save(next);
+          });
+          continue;
+        }
+        try {
+          await this.publishOwnerCopy(grant.portal, item.deviceId, item.senderId, item.messageId, grant.expiresAt);
+          await this.serialize(async () => {
+            const next = structuredClone(this.state);
+            delete next.ownerQueue?.[key];
+            await this.save(next);
+          });
+        } catch (error) {
+          if (error instanceof RelayRejection && error.status === 403) {
+            await this.serialize(async () => {
+              const next = structuredClone(this.state);
+              if (next.ownerGrants?.[item.deviceId]?.expiresAt !== grant.expiresAt ||
+                  next.ownerGrants?.[item.deviceId]?.portal !== grant.portal) return;
+              delete next.ownerGrants?.[item.deviceId];
+              for (const [queuedKey, queued] of Object.entries(next.ownerQueue ?? {})) {
+                if (queued.deviceId === item.deviceId) delete next.ownerQueue?.[queuedKey];
+              }
+              await this.save(next);
+            });
+          }
+        }
+      }
+    } finally {
+      this.flushingOwnerCopies = false;
+      if (this.ownerFlushRequested) {
+        this.ownerFlushRequested = false;
+        void this.flushOwnerCopies().catch(() => {});
+      }
+    }
+  }
+
+  async publishOwnerCopy(portal: string, deviceId: string, senderId: string, messageId: string, grantExpiresAt?: number) {
+    const url = new URL(portal);
+    const local = url.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
+    if ((!local && url.protocol !== "https:") || url.username || url.password ||
+        url.pathname !== "/" || url.search || url.hash) throw new Error("Expected a portal origin.");
+    const envelope = await this.serialize(async () => {
+      const device = this.state.ownerDevices?.[deviceId]?.device;
+      const incoming = this.state.inbox.find(item => item.id === messageId && item.senderId === senderId);
+      const outgoing = senderId === this.state.identity.agentId ? this.state.outbox?.[messageId] : undefined;
+      const message = incoming ?? (outgoing && {
+        id: outgoing.id, senderId, recipientId: outgoing.recipientId, text: outgoing.text,
+        receivedAt: outgoing.createdAt, direct: outgoing.direct,
+      });
+      if (!device || !message) throw new Error("Unknown approved device or message.");
+      const id = createHash("sha256").update(JSON.stringify([senderId, messageId])).digest("hex");
+      const key = deviceId + ":" + id;
+      let staged = this.state.ownerCopies?.[key];
+      if (!staged) {
+        staged = await sealOwnerCopy(this.state.identity, device, id, JSON.stringify(message));
+        const next = structuredClone(this.state);
+        (next.ownerCopies ??= {})[key] = staged;
+        await this.save(next);
+      }
+      return staged;
+    });
+    if (grantExpiresAt !== undefined) {
+      const current = this.state.ownerGrants?.[deviceId];
+      if (!current || current.portal !== url.origin || current.expiresAt !== grantExpiresAt || grantExpiresAt <= Date.now()) {
+        throw new Error("Device grant is no longer active.");
+      }
+    }
+    const grantNonce = this.state.ownerDevices?.[deviceId]?.nonce;
+    if (!grantNonce) throw new Error("Device grant is unavailable.");
+    const payload = grantExpiresAt === undefined ? { envelope, grantNonce } : { envelope, grantNonce, grantExpiresAt };
+    const timestamp = String(Date.now());
+    const reply = await fetch(url.origin + "/copy/publish", {
+      method: "POST", redirect: "manual",
+      signal: AbortSignal.any([this.shutdown.signal, AbortSignal.timeout(10_000)]),
+      headers: {
+        "content-type": "application/json",
+        "x-agent-timestamp": timestamp,
+        "x-agent-signature": await signRequest(this.state.identity, "owner-copy-v1", timestamp, payload),
+      },
+      body: JSON.stringify(payload),
+    });
+    if (!reply.ok) throw new RelayRejection("owner-copy", reply.status);
+    return { messageId, deviceId, submitted: true };
+  }
 }
 
 async function main() {
@@ -880,6 +1047,82 @@ async function main() {
       result(await adapter.exportInvite(displayName, expiresInMinutes)),
   );
   const profileInput = z.string().min(1).max(8192);
+  const pairingRequest = z.object({
+    accountId: z.string().regex(/^[1-9][0-9]{0,19}$/),
+    agentId: z.string().refine(agentId),
+    device: z.object({
+      agentId: z.string().refine(agentId),
+      signingPublicKey: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
+      encryptionPublicKey: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
+    }).strict(),
+    nonce: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
+    expiresAt: z.number().int(),
+  }).strict();
+  server.registerTool(
+    "owner_device_approve",
+    {
+      description: "Ask the owner to approve a read-only device pairing request. Return the signed approval for manual completion.",
+      inputSchema: { request: pairingRequest },
+    },
+    async ({ request }) => {
+      if (request.agentId !== adapter.status().agentId || request.expiresAt <= Date.now() ||
+          request.expiresAt > Date.now() + 300_000) throw new Error("Invalid or expired pairing request.");
+      await ownerApproval(
+        `Approve read-only device ${request.device.agentId} for GitHub account ID ${request.accountId}? Compare its public encryption key independently: ${request.device.encryptionPublicKey}`,
+      );
+      return result(await adapter.serialize(() => adapter.approveOwnerDevice(request)));
+    },
+  );
+  server.registerTool(
+    "owner_device_copy",
+    {
+      description: "With explicit owner approval, encrypt one received message for an approved read-only device and submit it to its portal.",
+      inputSchema: {
+        portal: z.string().url(), deviceId: z.string().refine(agentId),
+        senderId: z.string().refine(agentId), messageId: z.string().min(1).max(128),
+      },
+    },
+    async ({ portal, deviceId, senderId, messageId }) => {
+      await ownerApproval(`Send an encrypted copy of message ${messageId} from ${senderId} to device ${deviceId} at ${portal}?`);
+      return result(await adapter.publishOwnerCopy(portal, deviceId, senderId, messageId));
+    },
+  );
+  server.registerTool(
+    "owner_device_enable",
+    {
+      description: "Enable automatic encrypted copies of future direct messages for a previously approved device until the chosen expiry.",
+      inputSchema: {
+        portal: z.string().url(), deviceId: z.string().refine(agentId),
+        minutes: z.number().int().min(1).max(43_200),
+      },
+    },
+    async ({ portal, deviceId, minutes }) => {
+      await ownerApproval(`Enable automatic copies of future direct messages to ${deviceId} at ${portal} for ${minutes} minutes?`);
+      await adapter.serialize(() => adapter.enableOwnerDevice(deviceId, portal, Date.now() + minutes * 60_000));
+      return result({ enabled: true, deviceId, minutes });
+    },
+  );
+  server.registerTool(
+    "owner_thread_backfill",
+    {
+      description: "With owner approval, queue previously received and sent messages from one direct thread for an active read-only device.",
+      inputSchema: {
+        deviceId: z.string().refine(agentId), peerId: z.string().refine(agentId),
+        threadId: z.string().min(1).max(128),
+      },
+    },
+    async ({ deviceId, peerId, threadId }) => {
+      await ownerApproval(`Copy existing thread ${threadId} with ${peerId} to device ${deviceId}?`);
+      const queued = await adapter.serialize(() => adapter.backfillOwnerThread(deviceId, peerId, threadId));
+      void adapter.flushOwnerCopies().catch(() => {});
+      return result({ queued });
+    },
+  );
+  server.registerTool(
+    "owner_copy_retry",
+    { description: "Retry queued encrypted device copies after a portal outage.", inputSchema: {} },
+    async () => { void adapter.flushOwnerCopies().catch(() => {}); return result({ retryStarted: true }); },
+  );
   const inviteInputs = { invite: z.string().min(1).max(4096), profile: profileInput.optional() };
   server.registerTool(
     "profile_export",

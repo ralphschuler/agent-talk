@@ -28,3 +28,15 @@ jobs:
       - run: node scripts/test-local-e2e.mjs
       - run: npm run build
       - run: npx cf build --mode test
+      - run: npx vp build --config portal/vite.config.ts
+      - name: Verify owner portal and real local MCP clients
+        run: |
+          npm run dev > "$RUNNER_TEMP/agent-talk-relay.log" 2>&1 &
+          relay_pid=$!
+          trap 'kill "$relay_pid" 2>/dev/null || true' EXIT
+          for attempt in $(seq 1 60); do
+            if curl --silent --fail http://localhost:5173/healthz >/dev/null; then break; fi
+            sleep 1
+          done
+          curl --silent --fail http://localhost:5173/healthz >/dev/null
+          AGENT_TALK_TEST_RELAY=http://localhost:5173 AGENT_TALK_CHROME="$(command -v google-chrome)" node --import tsx scripts/test-portal-session.mjs

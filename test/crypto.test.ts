@@ -1,6 +1,14 @@
 import { expect, it } from "vite-plus/test";
-import { createLocalIdentity, openEnvelope, sealEnvelope, signInvite, verifyInvite } from "../src/crypto.ts";
+import { createLocalIdentity, openEnvelope, openOwnerCopy, sealEnvelope, sealOwnerCopy, signInvite, verifyInvite } from "../src/crypto.ts";
 import type { Invite } from "../src/protocol.ts";
+
+it("supports a maximum-length escaped message in an encrypted owner copy", async () => {
+  const agent = await createLocalIdentity();
+  const device = await createLocalIdentity();
+  const content = JSON.stringify({ text: "\u0000".repeat(12_000) });
+  const envelope = await sealOwnerCopy(agent, device, "maximum-owner-copy", content);
+  expect(await openOwnerCopy(device, agent, envelope)).toBe(content);
+});
 
 it("preserves complete Unicode text at the supported message boundary", async () => {
   const alice = await createLocalIdentity();

@@ -1,0 +1,11 @@
+:root { font: 16px/1.5 system-ui, sans-serif; color: #15332d; background: #f2f7f3; }
+main { max-width: 54rem; margin: 2rem auto; padding: 1.5rem; }
+section, #messages { margin-top: 1.5rem; }
+h1 { font-size: 2.25rem; margin-bottom: .25rem; }
+button, input, textarea { font: inherit; }
+button { background: #185b48; color: white; border: 0; border-radius: .4rem; padding: .6rem .9rem; margin: .4rem .4rem .4rem 0; cursor: pointer; }
+input, textarea { display: block; box-sizing: border-box; width: 100%; padding: .6rem; border: 1px solid #77988b; border-radius: .3rem; }
+textarea { min-height: 7rem; }
+label { display: block; margin-top: .8rem; }
+article { background: white; border: 1px solid #c7d9d0; border-radius: .4rem; padding: 1rem; margin: .7rem 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+:focus-visible { outline: 3px solid #ad5415; outline-offset: 3px; }
