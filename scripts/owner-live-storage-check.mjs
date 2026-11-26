@@ -39,7 +39,7 @@ export async function checkLiveStorage({ account, token, release, agentId, devic
   for (const id of [agentId, deviceId, recipientId]) assert.ok(typeof id === "string" && agentPattern.test(id), "Invalid synthetic public identity.");
   for (const id of [groupId, offlineMessageId, groupMessageId]) assert.ok(typeof id === "string" && uuidPattern.test(id), "Invalid synthetic message identifier.");
   const ownerCopyId = createHash("sha256").update(JSON.stringify([agentId, offlineMessageId])).digest("hex");
-  assert.ok(Array.isArray(messageMarkers) && messageMarkers.length >= 2 &&
+  assert.ok(Array.isArray(messageMarkers) && messageMarkers.length >= 2 && new Set(messageMarkers).size === messageMarkers.length &&
     messageMarkers.every(value => typeof value === "string" && value.length >= 16), "Direct and group test markers are required.");
   assert.ok(Array.isArray(privateKeys) && privateKeys.length >= 4 && new Set(privateKeys).size === privateKeys.length &&
     privateKeys.every(value => typeof value === "string" && /^[A-Za-z0-9_-]{43}$/.test(value) &&
