@@ -180,7 +180,7 @@ export class Directory extends DurableObject<Env> {
       if (Number(this.sql.exec("SELECT COUNT(*) AS n FROM admissions").one().n) >= 8192) return fail("pilot request limit", 429);
       this.sql.exec("INSERT INTO admissions VALUES (?, ?)", body.signature, body.expires);
       this.touch(actor, Number(identity.last_active), now);
-      return json({ ok: true });
+      return new Response(null, { status: 204 });
     }
     if (path === "/approve") {
       const invite = asInvite(body.invite, String(body.origin));
@@ -217,11 +217,11 @@ export class Directory extends DurableObject<Env> {
       const related = this.sql.exec("SELECT 1 FROM approvals WHERE (owner_id=? AND peer_id=?) OR (owner_id=? AND peer_id=?) LIMIT 1", actor, peer, peer, actor).toArray();
       if (!related.length) return fail("unknown contact", 404);
       this.sql.exec("INSERT OR IGNORE INTO blocks VALUES (?, ?, ?)", actor, peer, Date.now());
-      return json({ ok: true });
+      return new Response(null, { status: 204 });
     }
     if (path === "/permit") {
       const rows = this.sql.exec("SELECT 1 FROM approvals WHERE (owner_id=? AND peer_id=?) OR (owner_id=? AND peer_id=?)", actor, peer, peer, actor).toArray();
-      return rows.length === 2 && !this.blocked(actor, peer) ? json({ ok: true }) : fail("delivery is not permitted", 403);
+      return rows.length === 2 && !this.blocked(actor, peer) ? new Response(null, { status: 204 }) : fail("delivery is not permitted", 403);
     }
     return fail("not found", 404);
   }
@@ -250,7 +250,9 @@ export class Mailbox extends DurableObject<Env> {
     if (!agentId(owner)) {
       // Some wake-ups provide only the opaque DO ID. Check the full routing identity against it.
       for (const table of tables) {
-        for (const row of this.sql.exec(`SELECT json_extract(envelope, '$.recipientId') AS recipient FROM ${table} WHERE json_valid(envelope)`)) {
+        // Finish the legacy read before the directory call or schema changes.
+        const recipients = this.sql.exec(`SELECT DISTINCT json_extract(envelope, '$.recipientId') AS recipient FROM ${table} WHERE json_valid(envelope)`).toArray();
+        for (const row of recipients) {
           if (agentId(row.recipient) && this.env.MAILBOX.idFromName(row.recipient).equals(this.ctx.id)) {
             owner = row.recipient;
             break;
@@ -297,7 +299,7 @@ export class Mailbox extends DurableObject<Env> {
   }
 
   private async scheduleExpiry() {
-    const [oldest] = this.sql.exec("SELECT received FROM queue ORDER BY received LIMIT 1");
+    const [oldest] = this.sql.exec("SELECT received FROM queue ORDER BY received LIMIT 1").toArray();
     if (oldest) await this.ctx.storage.setAlarm(Number(oldest.received) + 7 * DAY);
   }
 
@@ -320,7 +322,7 @@ export class Mailbox extends DurableObject<Env> {
     if (path === "/bar" && agentId(body.sender)) {
       this.sql.exec("INSERT OR IGNORE INTO barred VALUES (?)", body.sender);
       this.sql.exec("DELETE FROM queue WHERE sender = ?", body.sender);
-      return json({ ok: true });
+      return new Response(null, { status: 204 });
     }
     if (path !== "/enqueue") return fail("not found", 404);
     const envelope = asEnvelope(body.envelope);

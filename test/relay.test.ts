@@ -205,12 +205,25 @@ it("enforces bounded offline retention and independent sender IDs in the same ma
   expect((await signedPost("/v1/send", alice, "send", { envelope: last })).status).toBe(201);
 });
 
+async function legacyPhase<T>(name: string, operation: Promise<T>, milliseconds: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  try {
+    return await Promise.race([operation, new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error("Timed out during " + name)), milliseconds);
+    })]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 it("replays authorized legacy mail only within its original retention window", async () => {
   const [alice, bob, carol] = await Promise.all(Array.from({ length: 3 }, () => createLocalIdentity()));
   await Promise.all([alice, bob, carol].map(register));
   await mutuallyApprove(alice, bob, "legacy-block");
   await mutuallyApprove(carol, bob, "legacy-mail");
-  expect((await signedPost("/v1/contact/block", alice, "contact/block", { peerId: bob.agentId })).status).toBe(200);
+  const block = await signedPost("/v1/contact/block", alice, "contact/block", { peerId: bob.agentId });
+  expect(block.status).toBe(200);
+  expect(await block.json()).toEqual({ ok: true });
   const now = Date.now();
   const [blocked, valid, expired, interim, oldInterim, future] = await Promise.all([
     sealEnvelope(alice, bob, "blocked", "synthetic", now - DAY),
@@ -235,8 +248,9 @@ it("replays authorized legacy mail only within its original retention window", a
       sql.exec("INSERT INTO queue VALUES (?,?,?,?)", envelope.senderId, envelope.id, JSON.stringify(envelope), now);
     }
   }));
-  await evictDurableObject(box);
-  const socket = await socketFor(bob);
+  // Request draining is part of real workerd eviction. Distinguish it from a constructor or replay stall.
+  await legacyPhase("graceful mailbox eviction", evictDurableObject(box), 25_000);
+  const socket = await legacyPhase("mailbox rehydration and signed socket upgrade", socketFor(bob), 12_000);
   const replay = nextMessage(socket);
   socket.send(JSON.stringify({ type: "resume" }));
   expect((await replay).envelope.id).toBe(interim.id);
@@ -250,7 +264,7 @@ it("replays authorized legacy mail only within its original retention window", a
     rows: [{ id: interim.id, received: interim.createdAt }, { id: valid.id, received: valid.createdAt }],
     originalTable: [], migrated: 1,
   });
-});
+}, 45_000);
 
 it("pushes live and safely replays after local persistence but before ACK", async () => {
   const alice = await createLocalIdentity();
