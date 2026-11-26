@@ -90,8 +90,8 @@ async function startMcp() {
 }
 let chrome;
 let secondMcp;
-async function browserSmoke(sessionCookie, agentId) {
-  const chromeProfile = join(directory, "chrome");
+async function browserSmoke(sessionCookie, agentId, expectEmpty = false) {
+  const chromeProfile = join(directory, "chrome-" + randomBytes(8).toString("hex"));
   chrome = spawn(process.env.AGENT_TALK_CHROME ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", [
     "--headless=new", "--disable-gpu", "--no-first-run", "--remote-debugging-port=0",
     "--user-data-dir=" + chromeProfile, "about:blank",
@@ -139,6 +139,13 @@ async function browserSmoke(sessionCookie, agentId) {
     assert.equal(cookieResult.success, true);
     await call("Page.navigate", { url: localPortal + "/" });
     await waitFor('document.querySelector("#status")?.textContent?.startsWith("Signed in")');
+    if (expectEmpty) {
+      await new Promise(resolve => setTimeout(resolve, 250));
+      assert.equal(await evaluate('document.querySelector("#status").textContent.includes("67890")'), true);
+      assert.equal(await evaluate('document.querySelectorAll("#agents button").length'), 0);
+      console.log("A separate browser profile could not see the first account's agents.");
+      return;
+    }
     await evaluate('document.querySelector("#agent-id").value = ' + JSON.stringify(agentId));
     await evaluate('document.querySelector("#start-pairing").click()');
     await waitFor('document.querySelector("#pair-request")?.value?.length > 0');
@@ -297,6 +304,7 @@ try {
   }, body: JSON.stringify(expiredPayload) });
   assert.equal(expiredPublish.status, 400);
   await browserSmoke(sessionCookie, agent.agentId);
+  await browserSmoke(secondSession, agent.agentId, true);
   if (process.env.AGENT_TALK_TEST_RELAY) {
     secondMcp = new Client({ name: "synthetic-peer", version: "1" }, { capabilities: { elicitation: { form: {} } } });
     const peerTransport = new StdioClientTransport({ command: process.execPath,
