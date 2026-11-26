@@ -33,11 +33,11 @@ function inspect(value, markers) {
 
 export async function checkLiveStorage({ account, token, release, agentId, deviceId, recipientId, groupId,
   offlineMessageId, groupMessageId, messageMarkers, privateKeys, fetcher = fetch }) {
-  assert.match(account ?? "", /^[a-f0-9]{32}$/i);
+  assert.ok(typeof account === "string" && /^[a-f0-9]{32}$/i.test(account), "Invalid Cloudflare account ID.");
   assert.ok(typeof token === "string" && token.length > 0);
-  assert.match(release ?? "", /^[a-f0-9]{40}$/);
-  for (const id of [agentId, deviceId, recipientId]) assert.match(id ?? "", agentPattern);
-  for (const id of [groupId, offlineMessageId, groupMessageId]) assert.match(id ?? "", uuidPattern);
+  assert.ok(typeof release === "string" && /^[a-f0-9]{40}$/.test(release), "Invalid staging release.");
+  for (const id of [agentId, deviceId, recipientId]) assert.ok(typeof id === "string" && agentPattern.test(id), "Invalid synthetic public identity.");
+  for (const id of [groupId, offlineMessageId, groupMessageId]) assert.ok(typeof id === "string" && uuidPattern.test(id), "Invalid synthetic message identifier.");
   const ownerCopyId = createHash("sha256").update(JSON.stringify([agentId, offlineMessageId])).digest("hex");
   assert.ok(Array.isArray(messageMarkers) && messageMarkers.length >= 2 &&
     messageMarkers.every(value => typeof value === "string" && value.length >= 16), "Direct and group test markers are required.");
@@ -145,7 +145,7 @@ export async function checkLiveStorage({ account, token, release, agentId, devic
   }
   function envelope(row, id, recipient, ownerCopy) {
     const value = decodeJson(row[0]);
-    assert.deepEqual(Object.keys(value).sort(), ["ciphertext", "createdAt", "enc", "id", "recipientId", "senderId", "version"]);
+    assert.ok(JSON.stringify(Object.keys(value).sort()) === JSON.stringify(["ciphertext", "createdAt", "enc", "id", "recipientId", "senderId", "version"]), "Invalid test envelope fields.");
     assert.ok((value.version === 1 || (!ownerCopy && value.version === 2)) && value.id === id &&
       value.senderId === agentId && value.recipientId === recipient && Number.isSafeInteger(value.createdAt) &&
       canonicalBytes(value.enc, 32) && canonicalBytes(value.ciphertext, 16, ownerCopy ? 90_016 : 48_016),
@@ -154,7 +154,7 @@ export async function checkLiveStorage({ account, token, release, agentId, devic
   envelope(ownerRows[0], ownerCopyId, deviceId, true);
   envelope(mailboxRows[0], offlineMessageId, recipientId, false);
   const group = decodeJson(groupRows[0][0]);
-  assert.deepEqual(Object.keys(group).sort(), ["actor", "epoch", "groupId", "id", "kind", "relay", "signature", "wire"]);
+  assert.ok(JSON.stringify(Object.keys(group).sort()) === JSON.stringify(["actor", "epoch", "groupId", "id", "kind", "relay", "signature", "wire"]), "Invalid test group fields.");
   assert.ok(group.kind === "app" && group.id === groupMessageId && group.groupId === groupId &&
     group.actor === agentId && group.relay === "https://agent-talk-test.ralph-cfd.workers.dev" &&
     Number.isSafeInteger(group.epoch) && group.epoch >= 0 && canonicalBytes(group.signature, 64) &&
