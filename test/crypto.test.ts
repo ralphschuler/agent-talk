@@ -10,8 +10,10 @@ it("uses authenticated HPKE with the pinned sender key", async () => {
 
   await expect(openEnvelope(bob, alice, envelope)).resolves.toBe("Ist die Dev-Vorschau bereit zum Review?");
   await expect(openEnvelope(bob, mallory, envelope)).rejects.toThrow();
-  const alteredFinalByte = envelope.ciphertext.endsWith("A") ? "B" : "A";
-  await expect(openEnvelope(bob, alice, { ...envelope, ciphertext: `${envelope.ciphertext.slice(0, -1)}${alteredFinalByte}` })).rejects.toThrow();
+  // Change a significant leading base64url character; changing the final one can
+  // only touch unused padding bits for some ciphertext lengths.
+  const alteredFirstCharacter = envelope.ciphertext.startsWith("A") ? "B" : "A";
+  await expect(openEnvelope(bob, alice, { ...envelope, ciphertext: `${alteredFirstCharacter}${envelope.ciphertext.slice(1)}` })).rejects.toThrow();
 });
 
 it("accepts a signed, unexpired invite once it is pinned locally", async () => {
