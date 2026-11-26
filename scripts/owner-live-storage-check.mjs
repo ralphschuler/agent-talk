@@ -8,13 +8,38 @@ const API = "https://api.cloudflare.com/client/v4/accounts/";
 const agentPattern = /^at1_[A-Za-z0-9_-]{43}$/;
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
+function containsDigest(bytes, markers) {
+  for (const { length, sha256 } of markers) {
+    for (let offset = 0; offset <= bytes.length - length; offset++) {
+      if (createHash("sha256").update(bytes.subarray(offset, offset + length)).digest("hex") === sha256) return true;
+    }
+  }
+  return false;
+}
+
+// Derive these locally from disposable synthetic values; only the digests travel.
+export function syntheticMaterialDigests(messageMarkers, privateKeys) {
+  assert.ok(Array.isArray(messageMarkers) && messageMarkers.length >= 2 && new Set(messageMarkers).size === messageMarkers.length &&
+    messageMarkers.every(value => typeof value === "string" && value.length >= 16 && Buffer.byteLength(value) <= 256), "Direct and group test markers are required.");
+  assert.ok(Array.isArray(privateKeys) && privateKeys.length >= 4 && new Set(privateKeys).size === privateKeys.length &&
+    privateKeys.every(value => typeof value === "string" && /^[A-Za-z0-9_-]{43}$/.test(value) &&
+      Buffer.from(value, "base64url").length === 32 && Buffer.from(value, "base64url").toString("base64url") === value),
+  "Distinct synthetic endpoint private keys are required.");
+  return [...messageMarkers.map(value => ({ kind: "message", bytes: Buffer.from(value) })),
+    ...privateKeys.flatMap(value => {
+      const key = Buffer.from(value, "base64url");
+      return [Buffer.from(value), key, Buffer.from(key.toString("base64")), Buffer.from(key.toString("hex"))]
+        .map(bytes => ({ kind: "key", bytes }));
+    })].map(({ kind, bytes }) => ({ kind, length: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex") }));
+}
+
 function inspect(value, markers) {
   if (typeof value === "string") {
     const bytes = Buffer.from(value);
-    assert.ok(markers.every(marker => !bytes.includes(marker)), "Private test material appeared in remote storage.");
+    assert.ok(!containsDigest(bytes, markers), "Private test material appeared in remote storage.");
     if (/^[A-Za-z0-9_-]+$/.test(value)) {
       const decoded = Buffer.from(value, "base64url");
-      assert.ok(markers.every(marker => !decoded.includes(marker)), "Private test material appeared in remote storage.");
+      assert.ok(!containsDigest(decoded, markers), "Private test material appeared in remote storage.");
     } else if (value.startsWith("{") || value.startsWith("[")) {
       let parsed;
       try { parsed = JSON.parse(value); } catch { return; }
@@ -23,7 +48,7 @@ function inspect(value, markers) {
   } else if (Array.isArray(value)) {
     if (value.length && value.every(entry => Number.isInteger(entry) && entry >= 0 && entry <= 255)) {
       const bytes = Buffer.from(value);
-      assert.ok(markers.every(marker => !bytes.includes(marker)), "Private test material appeared in remote storage.");
+      assert.ok(!containsDigest(bytes, markers), "Private test material appeared in remote storage.");
     }
     for (const entry of value) inspect(entry, markers);
   } else if (value && typeof value === "object") {
@@ -32,27 +57,27 @@ function inspect(value, markers) {
 }
 
 export async function checkLiveStorage({ account, token, release, agentId, deviceId, recipientId, groupId,
-  offlineMessageId, groupMessageId, messageMarkers, privateKeys, fetcher = fetch }) {
+  offlineMessageId, groupMessageId, messageMarkers, privateKeys, materialDigests, expectedDeployment, fetcher = fetch }) {
   assert.ok(typeof account === "string" && /^[a-f0-9]{32}$/i.test(account), "Invalid Cloudflare account ID.");
   assert.ok(typeof token === "string" && token.length > 0);
   assert.ok(typeof release === "string" && /^[a-f0-9]{40}$/.test(release), "Invalid staging release.");
   for (const id of [agentId, deviceId, recipientId]) assert.ok(typeof id === "string" && agentPattern.test(id), "Invalid synthetic public identity.");
   for (const id of [groupId, offlineMessageId, groupMessageId]) assert.ok(typeof id === "string" && uuidPattern.test(id), "Invalid synthetic message identifier.");
   const ownerCopyId = createHash("sha256").update(JSON.stringify([agentId, offlineMessageId])).digest("hex");
-  assert.ok(Array.isArray(messageMarkers) && messageMarkers.length >= 2 && new Set(messageMarkers).size === messageMarkers.length &&
-    messageMarkers.every(value => typeof value === "string" && value.length >= 16), "Direct and group test markers are required.");
-  assert.ok(Array.isArray(privateKeys) && privateKeys.length >= 4 && new Set(privateKeys).size === privateKeys.length &&
-    privateKeys.every(value => typeof value === "string" && /^[A-Za-z0-9_-]{43}$/.test(value) &&
-      Buffer.from(value, "base64url").length === 32 && Buffer.from(value, "base64url").toString("base64url") === value),
-  "Distinct synthetic endpoint private keys are required.");
-  const needles = [...messageMarkers, ...privateKeys].flatMap(value => {
-    const values = [Buffer.from(value)];
-    if (/^[A-Za-z0-9_-]{43}$/.test(value)) {
-      const key = Buffer.from(value, "base64url");
-      if (key.length === 32) values.push(key, Buffer.from(key.toString("base64")), Buffer.from(key.toString("hex")));
-    }
-    return values;
-  });
+  assert.ok(!(materialDigests && (messageMarkers || privateKeys)), "Use one private-material inspection mode.");
+  const needles = materialDigests ?? syntheticMaterialDigests(messageMarkers, privateKeys);
+  assert.ok(Array.isArray(needles) && needles.length >= 18 && needles.length <= 64 &&
+    needles.every(item => item && ["message", "key"].includes(item.kind) && Number.isInteger(item.length) &&
+      item.length >= 16 && item.length <= 256 && /^[a-f0-9]{64}$/.test(item.sha256)) &&
+    needles.filter(item => item.kind === "message").length >= 2 &&
+    needles.filter(item => item.kind === "key").length >= 16 &&
+    new Set(needles.map(item => item.kind + ":" + item.length + ":" + item.sha256)).size === needles.length,
+  "Invalid synthetic material digests.");
+  if (materialDigests) {
+    assert.ok(expectedDeployment && (uuidPattern.test(expectedDeployment.deploymentId ?? "") ||
+      /^[a-f0-9]{32}$/i.test(expectedDeployment.deploymentId ?? "")) &&
+      uuidPattern.test(expectedDeployment.versionId ?? ""), "An exact staging deployment is required.");
+  }
   const base = API + account + "/workers";
   async function request(path, body) {
     const response = await fetcher(base + path, {
@@ -99,6 +124,7 @@ export async function checkLiveStorage({ account, token, release, agentId, devic
     return { deploymentId: active.id, versionId };
   }
   const before = await activeDeployment();
+  if (expectedDeployment) assert.deepEqual(before, expectedDeployment, "Staging deployment does not match the evidence.");
   const namespaces = [];
   for (let page = 1; ; page++) {
     const data = await request("/durable_objects/namespaces?per_page=100&page=" + page);

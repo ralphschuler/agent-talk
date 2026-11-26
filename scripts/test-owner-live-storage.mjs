@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { checkLiveStorage } from "./owner-live-storage-check.mjs";
+import { checkLiveStorage, syntheticMaterialDigests } from "./owner-live-storage-check.mjs";
 
 const syntheticMarker = "synthetic message never sent to the API";
 const syntheticKeys = [1, 2, 3, 4].map(value => createHash("sha256").update("synthetic-key-" + value).digest("base64url"));
@@ -78,6 +78,19 @@ function fakeFetch(mode) {
 }
 
 assert.deepEqual(await checkLiveStorage({ ...input, fetcher: fakeFetch("safe") }), { ownerRows: 1, mailboxRows: 1, groupRows: 1 });
+const { messageMarkers, privateKeys, ...publicInput } = input;
+const materialDigests = syntheticMaterialDigests(messageMarkers, privateKeys);
+const expectedDeployment = { deploymentId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", versionId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc" };
+assert.equal(JSON.stringify(materialDigests).includes(syntheticMarker), false);
+for (const key of privateKeys) assert.equal(JSON.stringify(materialDigests).includes(key), false);
+assert.deepEqual(await checkLiveStorage({ ...publicInput, materialDigests, expectedDeployment, fetcher: fakeFetch("safe") }),
+  { ownerRows: 1, mailboxRows: 1, groupRows: 1 });
+await assert.rejects(checkLiveStorage({ ...publicInput, materialDigests, expectedDeployment, fetcher: fakeFetch("leak") }), /Private test material/);
+await assert.rejects(checkLiveStorage({ ...publicInput, materialDigests, expectedDeployment, fetcher: fakeFetch("binary-key-leak") }), /Private test material/);
+await assert.rejects(checkLiveStorage({ ...publicInput, materialDigests, fetcher: fakeFetch("safe") }), /exact staging deployment/);
+await assert.rejects(checkLiveStorage({ ...publicInput, materialDigests, expectedDeployment: { ...expectedDeployment,
+  versionId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd" }, fetcher: fakeFetch("safe") }), /deployment does not match/);
+await assert.rejects(checkLiveStorage({ ...publicInput, materialDigests: materialDigests.slice(0, 2), fetcher: fakeFetch("safe") }), /Invalid synthetic material digests/);
 await assert.rejects(checkLiveStorage({ ...input, fetcher: fakeFetch("leak") }), /Private test material/);
 await assert.rejects(checkLiveStorage({ ...input, fetcher: fakeFetch("empty") }), /exact synthetic/);
 await assert.rejects(checkLiveStorage({ ...input, fetcher: fakeFetch("wrong-release") }), /expected release/);
