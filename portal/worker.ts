@@ -73,9 +73,17 @@ export class PortalStore extends DurableObject<PortalEnv> {
       if (request.headers.get("origin") !== url.origin) return response({ error: "Invalid origin" }, 403);
       const { transaction, url: authorizationUrl } = await beginAuthorization(config);
       const browserToken = random();
-      this.sql.exec("DELETE FROM transactions WHERE expires <= ?", Date.now());
-      this.sql.exec("INSERT INTO transactions VALUES (?, ?, ?, ?)",
-        await hash(transaction.state), await hash(browserToken), transaction.verifier, transaction.expiresAt);
+      const stateHash = await hash(transaction.state);
+      const cookieHash = await hash(browserToken);
+      const inserted = this.ctx.storage.transactionSync(() => {
+        this.sql.exec("DELETE FROM transactions WHERE expires <= ?", Date.now());
+        const count = this.sql.exec<{ total: number }>("SELECT COUNT(*) AS total FROM transactions").toArray()[0].total;
+        if (count >= 1024) return false;
+        this.sql.exec("INSERT INTO transactions VALUES (?, ?, ?, ?)",
+          stateHash, cookieHash, transaction.verifier, transaction.expiresAt);
+        return true;
+      });
+      if (!inserted) return response({ error: "Too many pending authorizations" }, 429);
       return response({ url: authorizationUrl }, 200, { "Set-Cookie": `__Host-at_auth=${browserToken}; ${cookieOptions}; Max-Age=300` });
     }
     if (url.pathname === "/auth/callback" && request.method === "GET") {
