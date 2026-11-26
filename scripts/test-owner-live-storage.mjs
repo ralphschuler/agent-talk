@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { checkLiveStorage } from "./owner-live-storage-check.mjs";
 
 const syntheticMarker = "synthetic message never sent to the API";
-const syntheticKey = Buffer.alloc(32, 1).toString("base64url");
+const syntheticKeys = [1, 2, 3, 4].map(value => createHash("sha256").update("synthetic-key-" + value).digest("base64url"));
+const syntheticKey = syntheticKeys[0];
 const input = {
   account: "a".repeat(32), token: "synthetic-token",
   release: "d".repeat(40),
@@ -11,7 +13,7 @@ const input = {
   ownerCopyId: "e".repeat(64), offlineMessageId: "22222222-2222-4222-8222-222222222222",
   groupMessageId: "33333333-3333-4333-8333-333333333333",
   messageMarkers: [syntheticMarker, "another synthetic group marker"],
-  privateKeys: [1, 2, 3, 4].map(value => Buffer.alloc(32, value).toString("base64url")),
+  privateKeys: syntheticKeys,
 };
 
 function fakeFetch(mode) {
@@ -58,9 +60,18 @@ function fakeFetch(mode) {
     if (path.includes("/owner/")) assert.deepEqual(request.queries[0].params, [input.agentId, input.deviceId, input.ownerCopyId]);
     if (path.includes("/mailbox/")) assert.deepEqual(request.queries[0].params, [input.agentId, input.offlineMessageId]);
     if (path.includes("/directory/")) assert.deepEqual(request.queries[0].params, [input.groupId, input.groupMessageId, "app"]);
-    const field = mode === "leak" && path.includes("/owner/") ? syntheticMarker :
-      mode === "binary-key-leak" && path.includes("/owner/") ? Array.from(Buffer.from(syntheticKey, "base64url")) :
-      JSON.stringify({ ciphertext: "encrypted-synthetic-data" });
+    const isOwner = path.includes("/owner/");
+    const isMailbox = path.includes("/mailbox/");
+    const encoded = Buffer.alloc(32, 9).toString("base64url");
+    const envelope = { version: 1, id: isOwner ? input.ownerCopyId : input.offlineMessageId,
+      senderId: input.agentId, recipientId: isOwner ? input.deviceId : input.recipientId,
+      createdAt: 1, enc: encoded, ciphertext: encoded };
+    const group = { actor: input.agentId, epoch: 1, groupId: input.groupId, id: input.groupMessageId,
+      kind: "app", relay: "https://agent-talk-test.ralph-cfd.workers.dev",
+      signature: Buffer.alloc(64, 8).toString("base64url"), wire: encoded };
+    const valid = JSON.stringify(isOwner || isMailbox ? envelope : group);
+    const field = mode === "leak" && isOwner ? syntheticMarker :
+      mode === "binary-key-leak" && isOwner ? Array.from(Buffer.from(syntheticKey, "base64url")) : valid;
     return Response.json({ success: true, result: { results: [{ columns: ["data"], rows: mode === "empty" ? [] : [[field]], meta: {} }] } });
   };
 }

@@ -130,6 +130,34 @@ export async function checkLiveStorage({ account, token, release, agentId, devic
   assert.ok(ownerRows.length === 1 && mailboxRows.length === 1 && groupRows.length === 1,
     "Expected the exact synthetic owner, offline mailbox and group records.");
   for (const rows of [ownerRows, mailboxRows, groupRows]) inspect(rows, needles);
+  function decodeJson(value) {
+    assert.equal(typeof value, "string", "A test ciphertext record is missing.");
+    let parsed;
+    try { parsed = JSON.parse(value); } catch { throw new Error("A test ciphertext record is invalid."); }
+    assert.ok(parsed && typeof parsed === "object" && !Array.isArray(parsed), "A test ciphertext record is invalid.");
+    return parsed;
+  }
+  function canonicalBytes(value, min, max = min) {
+    if (typeof value !== "string" || !/^[A-Za-z0-9_-]+$/.test(value)) return false;
+    const bytes = Buffer.from(value, "base64url");
+    return bytes.length >= min && bytes.length <= max && bytes.toString("base64url") === value;
+  }
+  function envelope(row, id, recipient, ownerCopy) {
+    const value = decodeJson(row[0]);
+    assert.deepEqual(Object.keys(value).sort(), ["ciphertext", "createdAt", "enc", "id", "recipientId", "senderId", "version"]);
+    assert.ok((value.version === 1 || (!ownerCopy && value.version === 2)) && value.id === id &&
+      value.senderId === agentId && value.recipientId === recipient && Number.isSafeInteger(value.createdAt) &&
+      canonicalBytes(value.enc, 32) && canonicalBytes(value.ciphertext, 16, ownerCopy ? 90_016 : 48_016),
+      "A test envelope does not match its route or ciphertext format.");
+  }
+  envelope(ownerRows[0], ownerCopyId, deviceId, true);
+  envelope(mailboxRows[0], offlineMessageId, recipientId, false);
+  const group = decodeJson(groupRows[0][0]);
+  assert.deepEqual(Object.keys(group).sort(), ["actor", "epoch", "groupId", "id", "kind", "relay", "signature", "wire"]);
+  assert.ok(group.kind === "app" && group.id === groupMessageId && group.groupId === groupId &&
+    group.actor === agentId && group.relay === "https://agent-talk-test.ralph-cfd.workers.dev" &&
+    Number.isSafeInteger(group.epoch) && group.epoch >= 0 && canonicalBytes(group.signature, 64) &&
+    canonicalBytes(group.wire, 16, 65_536), "The test group record does not contain the expected encrypted application.");
   await exactRelease();
   const after = await activeDeployment();
   assert.deepEqual(after, before, "Staging deployment changed during inspection.");
