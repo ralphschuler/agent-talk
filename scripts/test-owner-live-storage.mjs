@@ -10,11 +10,12 @@ const input = {
   release: "d".repeat(40),
   agentId: "at1_" + "A".repeat(43), deviceId: "at1_" + "B".repeat(43),
   recipientId: "at1_" + "C".repeat(43), groupId: "11111111-1111-4111-8111-111111111111",
-  ownerCopyId: "e".repeat(64), offlineMessageId: "22222222-2222-4222-8222-222222222222",
+  offlineMessageId: "22222222-2222-4222-8222-222222222222",
   groupMessageId: "33333333-3333-4333-8333-333333333333",
   messageMarkers: [syntheticMarker, "another synthetic group marker"],
   privateKeys: syntheticKeys,
 };
+input.ownerCopyId = createHash("sha256").update(JSON.stringify([input.agentId, input.offlineMessageId])).digest("hex");
 
 function fakeFetch(mode) {
   let healthCount = 0;

@@ -1,6 +1,7 @@
 // Read only synthetic staging records. Plaintext markers and keys remain in the
 // caller process; the Cloudflare SQL requests contain public routing IDs only.
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { pathToFileURL } from "node:url";
 
 const API = "https://api.cloudflare.com/client/v4/accounts/";
@@ -31,13 +32,13 @@ function inspect(value, markers) {
 }
 
 export async function checkLiveStorage({ account, token, release, agentId, deviceId, recipientId, groupId,
-  ownerCopyId, offlineMessageId, groupMessageId, messageMarkers, privateKeys, fetcher = fetch }) {
+  offlineMessageId, groupMessageId, messageMarkers, privateKeys, fetcher = fetch }) {
   assert.match(account ?? "", /^[a-f0-9]{32}$/i);
   assert.ok(typeof token === "string" && token.length > 0);
   assert.match(release ?? "", /^[a-f0-9]{40}$/);
   for (const id of [agentId, deviceId, recipientId]) assert.match(id ?? "", agentPattern);
   for (const id of [groupId, offlineMessageId, groupMessageId]) assert.match(id ?? "", uuidPattern);
-  assert.match(ownerCopyId ?? "", /^[a-f0-9]{64}$/);
+  const ownerCopyId = createHash("sha256").update(JSON.stringify([agentId, offlineMessageId])).digest("hex");
   assert.ok(Array.isArray(messageMarkers) && messageMarkers.length >= 2 &&
     messageMarkers.every(value => typeof value === "string" && value.length >= 16), "Direct and group test markers are required.");
   assert.ok(Array.isArray(privateKeys) && privateKeys.length >= 4 && new Set(privateKeys).size === privateKeys.length &&
