@@ -1,12 +1,26 @@
 // Runs only inside a disposable synthetic adapter started by smoke-conversations.
 // Interrupt the HTTP ACK after the adapter has durably saved the expected group message.
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 const original = globalThis.fetch;
 globalThis.fetch = async function (url, options) {
   const path = new URL(url).pathname;
   const gate = process.env.SMOKE_GROUP_RACE_DIR;
+  if (
+    process.env.SMOKE_GROUP_WIRE_RECEIPT &&
+    path === "/v1/group/submit" &&
+    options?.method === "POST"
+  ) {
+    const { op } = JSON.parse(options.body);
+    if (op.kind === "app") {
+      const digest = createHash("sha256").update(Buffer.from(op.wire, "base64url")).digest("hex");
+      writeFileSync(process.env.SMOKE_GROUP_WIRE_RECEIPT, JSON.stringify({ id: op.id, digest }), {
+        mode: 0o600,
+      });
+    }
+  }
   if (
     gate &&
     path === "/v1/group/submit" &&

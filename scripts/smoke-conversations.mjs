@@ -1,5 +1,6 @@
 // Real stdio MCP clients talking to an explicitly selected relay with fresh synthetic identities.
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,9 +11,11 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { ElicitRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 
 const relay = new URL(process.argv[2]).origin;
+const [storage, storageMarker] = process.argv.slice(3);
 const dir = await mkdtemp(join(tmpdir(), "agent-talk-conversations-"));
 const checkout = fileURLToPath(new URL("../", import.meta.url));
 const clients = new Set();
+const joinKeys = [];
 
 async function until(description, read) {
   const deadline = Date.now() + 30_000;
@@ -52,6 +55,7 @@ async function start(name, interruptText) {
       SMOKE_GROUP_MESSAGE: interruptText ?? "",
       SMOKE_GROUP_RACE_DIR: dir,
       SMOKE_GROUP_ACTOR: name,
+      ...(storage && name === "A" ? { SMOKE_GROUP_WIRE_RECEIPT: join(dir, "wire-receipt") } : {}),
     },
   });
   transport.stderr.resume();
@@ -116,6 +120,11 @@ async function signedConsent(owner, member, groupId, target, permitId) {
 
 async function consentToJoin(owner, member, groupId, target) {
   const consent = await signedConsent(owner, member, groupId, target);
+  if (storage && member.name === "B" && joinKeys.length === 0) {
+    const state = JSON.parse(await readFile(member.profile, "utf8"));
+    const prepared = state.groups.accepts[consent.id].prepared;
+    joinKeys.push(prepared.initPrivateKey, prepared.hpkePrivateKey);
+  }
   await owner.call("group_add", { consent: JSON.stringify(consent) }, true);
   await until("accepted Welcome on the member socket", async () => {
     const rows = await member.call("group_list");
@@ -236,10 +245,11 @@ try {
     ).includes(dmReply.id),
   );
   await assert.rejects(a.call("management_shortcut", { command: "/group run", arguments: {} }));
-  await assert.rejects(a.call("group_create", { name: "Private review" }), /approval/i);
+  const name = "Private review " + randomUUID();
+  await assert.rejects(a.call("group_create", { name }), /approval/i);
   const { groupId } = await a.call(
     "management_shortcut",
-    { command: "/group create", arguments: { name: "Private review" } },
+    { command: "/group create", arguments: { name } },
     true,
   );
   assert.equal(typeof groupId, "string");
@@ -253,8 +263,27 @@ try {
   await consentToJoin(a, c, groupId, cId);
   assert.ok(!(await c.call("group_read", { groupId })).some((row) => row.id === prior.id));
   await b.close();
-  const text = "Can someone review the group preview after reconnect?";
+  const text = "Can someone review the group preview after reconnect? " + randomUUID();
   const ask = await a.call("group_ask", { groupId, text }, true);
+  if (storage) {
+    const { checkRelayPersistence } = await import("./check-relay-persistence.mjs");
+    await checkRelayPersistence({
+      relay,
+      storage,
+      storageMarker,
+      groupId,
+      sender: aId,
+      recipient: bId,
+      id: ask.id,
+      sent: JSON.parse(await readFile(join(dir, "wire-receipt"), "utf8")),
+      name,
+      text,
+      joinKeys,
+      endpointStates: await Promise.all(
+        [a, b].map(async (x) => JSON.parse(await readFile(x.profile, "utf8"))),
+      ),
+    });
+  }
   b = await start("B", text);
   await until("crash between durable inbox and HTTP ACK", () => onDisk(b.marker, "through"));
   await b.close();
