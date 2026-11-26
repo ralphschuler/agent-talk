@@ -1,5 +1,6 @@
 // Prepare real relay traffic using caller-supplied disposable MCP agents.
 import assert from "node:assert/strict";
+import { readFile, rm, unlink, writeFile } from "node:fs/promises";
 
 export async function prepareSyntheticScenario({ a1, a2, b3, invoke, waitForValue }) {
   async function link(left, right) {
@@ -44,4 +45,24 @@ export async function checkOfflineReplay({ sender, receiver, receiverId, restart
   assert.equal((await invoke(reopened, "inbox_list")).filter(item => item.id === message.id).length, 1,
     "Offline message must appear once.");
   return reopened;
+}
+
+export async function checkPortalRetry({ sender, receiver, receiverId, deviceId, statePath, outageFlag, invoke, waitForValue, verifyBrowser }) {
+  await writeFile(outageFlag, "", { mode: 0o600, flag: "wx" });
+  try {
+    const sent = await invoke(sender, "message_send", { recipientId: receiverId, text: "Synthetic portal retry message" });
+    await waitForValue(async () => (await invoke(receiver, "inbox_list")).some(item => item.id === sent.id), "Delivery during local portal interruption");
+    const state = JSON.parse(await readFile(statePath, "utf8"));
+    assert.ok(Object.values(state.ownerQueue ?? {}).some(item => item.deviceId === deviceId && item.messageId === sent.id),
+      "The encrypted owner copy was not durably queued.");
+    await unlink(outageFlag);
+    await invoke(receiver, "owner_copy_retry");
+    await waitForValue(async () => {
+      const current = JSON.parse(await readFile(statePath, "utf8"));
+      return !Object.values(current.ownerQueue ?? {}).some(item => item.deviceId === deviceId && item.messageId === sent.id);
+    }, "Owner copy retry");
+    await waitForValue(verifyBrowser, "Decrypted retried owner copy");
+  } finally {
+    await rm(outageFlag, { force: true });
+  }
 }

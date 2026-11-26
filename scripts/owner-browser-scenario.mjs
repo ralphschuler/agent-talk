@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 
 export async function runOwnerBrowserScenario({ evaluate, waitFor, portalOrigin, agentId,
   senderId, mcp, secondMcp, expectEmpty = false, multiAgent, firstAccountId, secondAccountId,
-  setApproval, delayRead, revokeFirst, signInSecond,
+  setApproval, delayRead, revokeFirst, signInSecond, testRetry = async () => {},
   firstThreadId = "synthetic-thread", firstMessageId = "synthetic-message" }) {
   if (expectEmpty) {
     await new Promise(resolve => setTimeout(resolve, 250));
@@ -46,6 +46,7 @@ export async function runOwnerBrowserScenario({ evaluate, waitFor, portalOrigin,
   assert.equal(await evaluate('document.querySelectorAll("#messages article").length'), 2);
   assert.equal(await evaluate('document.querySelector("#messages").textContent.includes("A second synthetic message")'), true);
   assert.equal(await evaluate('document.querySelector("#messages img") === null'), true);
+  await testRetry(request.device.agentId);
   if (multiAgent) {
     await setApproval(true);
     const groupBackfill = await mcp.callTool({ name: "owner_group_backfill", arguments: {

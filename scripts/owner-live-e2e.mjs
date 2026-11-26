@@ -1,4 +1,4 @@
-import { checkOfflineReplay, prepareSyntheticScenario } from "./owner-live-fixture.mjs";
+import { checkOfflineReplay, checkPortalRetry, prepareSyntheticScenario } from "./owner-live-fixture.mjs";
 // Interactive staging scenario. No credentials or browser state leave this machine.
 // This preliminary runner does not emit release evidence or unlock production.
 import assert from "node:assert/strict";
@@ -49,6 +49,7 @@ async function main() {
   const dir = await mkdtemp(join(tmpdir(), "agent-talk-live-e2e-"));
   const input = createInterface({ input: process.stdin, output: process.stdout });
   const clients = [];
+  const outageFlag = join(dir, "portal-outage");
   let browser;
   async function approve(message) {
     console.log("\nOwner confirmation for disposable test identities:\n" + message);
@@ -58,7 +59,10 @@ async function main() {
     const client = new Client({ name: "agent-talk-live-test", version: "1" }, { capabilities: { elicitation: { form: {} } } });
     const transport = new StdioClientTransport({ command: process.execPath,
       args: ["--import", "tsx", "adapter/mcp-adapter.ts", "--relay", relay, "--state", join(dir, name + ".json")],
-      cwd: process.cwd(), stderr: "pipe" });
+      cwd: process.cwd(), stderr: "pipe", ...(name === "a1" && { env: {
+        ...process.env, NODE_OPTIONS: "--import=" + resolve("scripts/owner-live-portal-outage.mjs"),
+        OWNER_TEST_PORTAL_ORIGIN: portal, OWNER_TEST_BLOCK_FILE: outageFlag,
+      } }) });
     transport.stderr.resume();
     client.setRequestHandler(ElicitRequestSchema, async request => (await approve(request.params.message))
       ? { action: "accept", content: { approve: true } } : { action: "decline" });
@@ -109,6 +113,14 @@ async function main() {
         groupId, groupThreadId: question.threadId },
       // The MCP client always asks the human, including for backfill and rejected copies.
       setApproval: async () => {},
+      testRetry: deviceId => checkPortalRetry({ sender: a2, receiver: a1, receiverId: one.agentId, deviceId,
+        statePath: join(dir, "a1.json"), outageFlag, invoke, waitForValue,
+        verifyBrowser: async () => {
+            await page.locator("#agents button").filter({ hasText: one.agentId }).click();
+            return page.evaluate(() => Array.from(document.querySelectorAll("#messages article"))
+              .filter(item => item.textContent.includes("Synthetic portal retry message")).length === 1);
+        },
+      }),
       delayRead: async target => {
         const handler = async route => {
           let body;

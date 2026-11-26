@@ -1,4 +1,5 @@
 import { runOwnerBrowserScenario } from "./owner-browser-scenario.mjs";
+import { checkPortalRetry } from "./owner-live-fixture.mjs";
 import assert from "node:assert/strict";
 import { build } from "esbuild";
 import { Miniflare, convertV4MiniflareOptions } from "miniflare";
@@ -94,7 +95,9 @@ async function startMcp() {
   const transport = new StdioClientTransport({ command: process.execPath,
     args: ["--import", "tsx", "adapter/mcp-adapter.ts", "--relay", relayOrigin, "--state", join(directory, "state.json")],
     cwd: process.cwd(), stderr: "pipe",
-    env: { ...process.env, NODE_OPTIONS: "--import=" + resolve("scripts/owner-ack-fixture.mjs"), OWNER_ACK_FILE: join(directory, "ack") } });
+    env: { ...process.env, NODE_OPTIONS: "--import=" + resolve("scripts/owner-ack-fixture.mjs") +
+      " --import=" + resolve("scripts/owner-live-portal-outage.mjs"), OWNER_ACK_FILE: join(directory, "ack"),
+      OWNER_TEST_PORTAL_ORIGIN: localPortal, OWNER_TEST_BLOCK_FILE: join(directory, "portal-outage") } });
   transport.stderr.resume();
   client.setRequestHandler(ElicitRequestSchema, async () => ownerApproved
     ? { action: "accept", content: { approve: true } } : { action: "decline" });
@@ -156,6 +159,28 @@ async function browserSmoke(sessionCookie, agentId, expectEmpty = false, multiAg
     await runOwnerBrowserScenario({ evaluate, waitFor, portalOrigin: localPortal, agentId,
       senderId: sender.agentId, mcp, secondMcp, expectEmpty, multiAgent, firstAccountId: "12345", secondAccountId: "67890",
       setApproval: async approved => { ownerApproved = approved; },
+      testRetry: async deviceId => {
+        if (!multiAgent) return;
+        const invoke = async (client, name, args = {}) => {
+          const result = await client.callTool({ name, arguments: args });
+          assert.notEqual(result.isError, true);
+          return JSON.parse(result.content[0].text);
+        };
+        const waitForValue = async (fn, message) => {
+          for (let attempt = 0; attempt < 100; attempt++) {
+            if (await fn()) return;
+            await new Promise(resolve => setTimeout(resolve, 100));
+          }
+          throw new Error(message + " timed out.");
+        };
+        await checkPortalRetry({ sender: secondMcp, receiver: mcp, receiverId: agentId, deviceId,
+          statePath: join(directory, "state.json"), outageFlag: join(directory, "portal-outage"), invoke, waitForValue,
+          verifyBrowser: async () => {
+            await evaluate('Array.from(document.querySelectorAll("#agents button")).find(b => b.textContent === ' + JSON.stringify(agentId) + ')?.click()');
+            return evaluate('Array.from(document.querySelectorAll("#messages article")).filter(item => item.textContent.includes("Synthetic portal retry message")).length === 1');
+          },
+        });
+      },
       delayRead: async id => { delayedAgentId = id; },
       revokeFirst: async id => evaluate('window.confirm = () => true; Array.from(document.querySelectorAll("#agents button")).find(b => b.textContent === ' + JSON.stringify(id) + ').nextElementSibling.click()'),
       signInSecond: async () => {
