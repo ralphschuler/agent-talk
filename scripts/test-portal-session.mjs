@@ -173,10 +173,14 @@ async function browserSmoke(sessionCookie, agentId, expectEmpty = false, multiAg
           }
           throw new Error(message + " timed out.");
         };
+        let requested = false;
         await checkPortalRetry({ sender: secondMcp, receiver: mcp, receiverId: agentId, deviceId,
           statePath: join(directory, "state.json"), outageFlag: join(directory, "portal-outage"), invoke, waitForValue,
           verifyBrowser: async () => {
-            await evaluate('Array.from(document.querySelectorAll("#agents button")).find(b => b.textContent === ' + JSON.stringify(agentId) + ')?.click()');
+            if (!requested) {
+              requested = true;
+              await evaluate('Array.from(document.querySelectorAll("#agents button")).find(b => b.textContent === ' + JSON.stringify(agentId) + ')?.click()');
+            }
             return evaluate('Array.from(document.querySelectorAll("#messages article")).filter(item => item.textContent.includes("Synthetic portal retry message")).length === 1');
           },
         });

@@ -113,14 +113,20 @@ async function main() {
         groupId, groupThreadId: question.threadId },
       // The MCP client always asks the human, including for backfill and rejected copies.
       setApproval: async () => {},
-      testRetry: deviceId => checkPortalRetry({ sender: a2, receiver: a1, receiverId: one.agentId, deviceId,
-        statePath: join(dir, "a1.json"), outageFlag, invoke, waitForValue,
-        verifyBrowser: async () => {
-            await page.locator("#agents button").filter({ hasText: one.agentId }).click();
+      testRetry: deviceId => {
+        let requested = false;
+        return checkPortalRetry({ sender: a2, receiver: a1, receiverId: one.agentId, deviceId,
+          statePath: join(dir, "a1.json"), outageFlag, invoke, waitForValue,
+          verifyBrowser: async () => {
+            if (!requested) {
+              requested = true;
+              await page.locator("#agents button").filter({ hasText: one.agentId }).click();
+            }
             return page.evaluate(() => Array.from(document.querySelectorAll("#messages article"))
               .filter(item => item.textContent.includes("Synthetic portal retry message")).length === 1);
-        },
-      }),
+          },
+        });
+      },
       delayRead: async target => {
         const handler = async route => {
           let body;
