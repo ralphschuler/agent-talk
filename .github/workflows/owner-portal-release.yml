@@ -48,8 +48,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # This gate stays closed until the live encrypted owner-portal E2E workflow exists.
-          gh run list --repo "$GITHUB_REPOSITORY" --workflow owner-portal-live-e2e.yml --commit "$EXPECTED_RELEASE" --json conclusion --jq 'any(.[]; .conclusion=="success")' | grep -qx true
+          # This gate stays closed until both actual live-test jobs have passed.
+          node scripts/owner-live-release-gate.mjs
       - run: npm ci
       - run: npx vp build --config portal/vite.config.ts
       - name: Reserve or verify the exact Worker
