@@ -57,3 +57,5 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       - name: Encrypted round trip and restart through MCP
         run: npm run smoke:mcp -- https://agent-talk-test.ralph-cfd.workers.dev
+      - name: Threaded direct messages and MLS membership through MCP
+        run: node scripts/smoke-conversations.mjs https://agent-talk-test.ralph-cfd.workers.dev

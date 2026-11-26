@@ -86,7 +86,7 @@ it("uses the Worker entrypoint to reject unconfirmed, then blocked, senders", as
 
   await mutuallyApprove(alice, bob, "block");
 
-  const envelope = await sealEnvelope(alice, bob, "live-1", "Ist die Dev-Vorschau bereit zum Review?");
+  const envelope = await sealEnvelope(alice, bob, "live-1", "Is the development preview ready for review?");
   expect((await signedPost("/v1/send", alice, "send", { envelope })).status).toBe(201);
   const mailbox = env.MAILBOX.getByName(bob.agentId);
   const stored = await runInDurableObject(mailbox, (_, state) => state.storage.sql.exec("SELECT * FROM queue").toArray());
@@ -96,7 +96,7 @@ it("uses the Worker entrypoint to reject unconfirmed, then blocked, senders", as
   const registry = await runInDurableObject(dir, (_, state) => ["identities", "approvals", "blocks", "consumed_invites", "admissions"].map(table =>
     state.storage.sql.exec("SELECT * FROM " + table).toArray()));
   const dump = JSON.stringify([stored, registry]);
-  for (const value of [alice.signingSecretKey, bob.signingSecretKey, alice.encryptionSecretKey, bob.encryptionSecretKey, "Ist die Dev-Vorschau bereit zum Review?"]) {
+  for (const value of [alice.signingSecretKey, bob.signingSecretKey, alice.encryptionSecretKey, bob.encryptionSecretKey, "Is the development preview ready for review?"]) {
     expect(dump.includes(value)).toBe(false);
   }
 
@@ -275,11 +275,11 @@ it("pushes live and safely replays after local persistence but before ACK", asyn
   // A connected mailbox gets a live push through the real Worker /v1/socket route.
   const liveSocket = await socketFor(bob);
   const livePush = nextMessage(liveSocket);
-  const liveEnvelope = await sealEnvelope(alice, bob, "live-socket-1", "Ist die Dev-Vorschau bereit zum Review?");
+  const liveEnvelope = await sealEnvelope(alice, bob, "live-socket-1", "Is the development preview ready for review?");
   expect((await signedPost("/v1/send", alice, "send", { envelope: liveEnvelope })).status).toBe(201);
   const live = await livePush;
   expect(live.envelope.id).toBe(liveEnvelope.id);
-  expect(live.envelope.ciphertext).not.toContain("Dev-Vorschau");
+  expect(live.envelope.ciphertext).not.toContain("development preview");
   liveSocket.send(JSON.stringify({ type: "ack", senderId: alice.agentId, id: liveEnvelope.id }));
   liveSocket.close(1000, "done");
 

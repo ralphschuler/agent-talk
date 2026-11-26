@@ -1,56 +1,65 @@
-# Agent Talk für OpenClaw
+# Agent Talk
 
-Zwei Personen können ihren persönlichen OpenClaw-Agenten gegenseitig eine Frage schicken und gezielt antworten lassen. Beide geben den Kontakt frei. Die Nachricht ist zwischen den beiden lokalen Adaptern Ende zu Ende verschlüsselt.
+Agent Talk lets two colleagues exchange questions and replies through their own agents. Each person approves the other’s identity. Their local adapters encrypt the messages before sending them to the relay and hold them for reading after delivery.
 
-## 1. Beide richten ihren eigenen Agenten ein
+## Set up two OpenClaw agents
 
-Für diesen Produktionspilot wird **OpenClaw 2026.11.10 mit eingebettetem Agenten und Control UI** unterstützt. Jede Person braucht ein eigenes, nur von ihr kontrolliertes Profil und separat freigegebenen Zugriff auf den privaten Agent-Talk-Checkout. Eine Kontakteinladung gewährt keinen Repository-Zugriff.
+Both colleagues need access to this private checkout and a separate OpenClaw profile under their own control. A contact invitation grants messaging access only. The direct-message pilot was tested with **OpenClaw 2026.11.10**, its embedded agent and its Control UI.
 
-1. Öffne ein Terminal im freigegebenen Checkout. Prüfe mit `node --version`, dass du Node.js 24.x ab 24.22.0 verwendest. Führe dort `npm ci` aus. Mit `pwd -P` erhältst du den absoluten Pfad des Checkouts.
-2. Lege im Control UI deines Profils unter **Settings → MCP** einen lokalen **stdio**-Server namens `agent-talk` an. Trage die folgenden Werte ein. Wenn die einfache Maske kein Arbeitsverzeichnis anbietet, nutze auf derselben Seite den Konfigurationseditor für den Server. Ersetze die beiden Beispielpfade durch deine absoluten Pfade. [MCP-Server in OpenClaw einrichten](https://docs.openclaw.ai/tools/mcp)
+1. In the checkout, run `node --version` and check for Node 24.22.0 or newer in the 24.x series. Run `npm ci`. Use `pwd -P` to get the absolute checkout path.
+2. In your profile’s **Settings → MCP**, add a **stdio** server named `agent-talk`. Enter the example below in the server configuration editor, replacing both example paths with absolute paths on your machine. OpenClaw starts the adapter. [OpenClaw MCP setup](https://docs.openclaw.ai/tools/mcp)
 
    ```json
    {
      "command": "npm",
-     "args": ["--silent", "run", "mcp", "--", "--relay", "https://agent-talk.nyphon.de", "--state", "/Users/DEINNAME/.agent-talk/openclaw/main/state.json"],
-     "cwd": "/Users/DEINNAME/Documents/Github/agent-talk"
+     "args": ["--silent", "run", "mcp", "--", "--relay", "https://agent-talk.nyphon.de", "--state", "/Users/YOURNAME/.agent-talk/openclaw/main/state.json"],
+     "cwd": "/Users/YOURNAME/Documents/Github/agent-talk"
    }
    ```
 
-3. Aktiviere `mcp.apps.enabled` ausdrücklich in deinem persönlichen Profil und starte dessen Gateway neu. Bei einem **benannten Profil** ersetze `PROFILNAME` durch seinen Namen. Beim Standardprofil entfällt `--profile PROFILNAME` in beiden Zeilen. [MCP Apps in OpenClaw](https://docs.openclaw.ai/cli/mcp/apps)
+3. Enable owner dialogs in the same profile and restart its gateway. Replace `PROFILE` with the named profile. For the default profile, omit `--profile PROFILE` from both commands. [OpenClaw MCP Apps](https://docs.openclaw.ai/cli/mcp/apps)
 
    ```sh
-   openclaw --profile PROFILNAME config set mcp.apps.enabled true --strict-json
-   openclaw --profile PROFILNAME gateway restart
+   openclaw --profile PROFILE config set mcp.apps.enabled true --strict-json
+   openclaw --profile PROFILE gateway restart
    ```
 
-4. Bitte deinen Agenten im Control UI, `adapter_status` aufzurufen. Prüfe Relay und `socket: connected`. Notiere deine öffentliche `agentId` und deinen `fingerprint`. OpenClaw startet den Adapter selbst. Jeder Agent braucht pro Relay eine eigene Zustandsdatei außerhalb des Checkouts. Der Adapter legt sie mit Modus `0600` an und verlangt ein nur für den Eigentümer zugängliches Verzeichnis (`0700`).
+4. In the Control UI ask the agent to run `adapter_status`. Check the relay address and `socket: connected`. Record your own public `agentId` and `fingerprint` so the other person can verify them.
 
-**Umgebungen.** Nutzt beide entweder die Produktion (`https://agent-talk.nyphon.de`) oder den Testserver (`https://agent-talk-test.ralph-cfd.workers.dev`). Für einen Test ändert ihr im Beispiel die Relay-Adresse und den Dateipfad auf `…/openclaw/test/state.json`, startet das zugehörige Gateway neu und tauscht frische Testeinladungen aus. Der Beispielpfad mit `…` ist eine Abkürzung. Tragt den vollständigen absoluten Pfad ein.
+Use the **same relay** on both sides. The production address is `https://agent-talk.nyphon.de`. To try the test service, use `https://agent-talk-test.ralph-cfd.workers.dev` in both configurations, change each state path from `/main/` to `/test/`, restart each gateway, and exchange fresh test invitations. Use a different state file for every agent and relay, outside the checkout. The adapter creates a private state file (`0600`) and requires an owner-only directory (`0700`).
 
-## 2. Einladungen tauschen und Schlüssel vergleichen
+## Exchange and verify invitations
 
-1. Beide rufen `profile_export_invite` mit ihrem Anzeigenamen in `displayName` auf und teilen die vollständige signierte Einmaleinladung über einen privaten Kanal. Sie enthält öffentliche Schlüssel, Relay und einen MCP-Hinweis. Prüft Hinweise zu fremder Software, bevor ihr etwas installiert.
-2. Beide rufen `contact_preview` mit der **empfangenen** Einladung als `invite` auf. Vergleicht über einen vertrauten zweiten Kontaktweg, etwa ein Telefonat. A vergleicht Bs Vorschau mit der Agent-ID und allen 64 Zeichen des Fingerabdrucks, die **B aus dem eigenen** `adapter_status` abliest. Anschließend vergleicht B dasselbe für A.
-3. Beide rufen `contact_confirm` mit demselben empfangenen Einladungstext auf. Prüft ID, Relay und Fingerabdruck im Dialog des Control UI. Bei Übereinstimmung wählt ihr jeweils **Ja** und sendet die Entscheidung ab. **Nein** lässt die Einladung bis zu ihrem Ablauf für einen neuen Versuch verfügbar. Die Zustellung beginnt nach beiden Freigaben.
+1. Both agents call `profile_export_invite` with a `displayName`. Send each other the entire signed, expiring invitation through a private channel. It contains public keys, the relay and an adapter hint. Review any third-party software manually before installing it.
+2. Each agent calls `contact_preview` with the other person’s invitation string in `invite`. Use a trusted independent channel, such as a call. Compare the **peer’s** preview ID and all 64 fingerprint characters with what that person reads from **their own** `adapter_status`. Do this in both directions.
+3. Each agent calls `contact_confirm` with that same received invitation. Check the ID, relay and full fingerprint in the **Control UI dialog**. Choose **Yes** and submit only when they match. Choosing **No** leaves the invitation available until expiry. Delivery starts after both owners have approved.
 
-## 3. Eine Frage und eine Antwort
+## Send a question and one reply
 
-| Wer | Aktion im eigenen OpenClaw |
+| Who | Action in their own host |
 | --- | --- |
-| A | Rufe `message_send` mit Bs bestätigter Agent-ID als `recipientId` und „Ist die Dev-Vorschau bereit zum Review?“ als `text` auf. |
-| B | Lies die Frage mit `inbox_list`. Beauftrage dann einmal ausdrücklich `message_send` an As Agent-ID, etwa mit „Ja, du kannst mit dem Review starten.“ |
-| A | Lies die Antwort mit `inbox_list`. Der Empfang löst keine weitere Nachricht aus. |
+| A | Call `message_send` with B’s confirmed ID as `recipientId` and `Is the development preview ready for review?` as `text`. |
+| B | Read the question with `inbox_list`. Explicitly call `message_send` **once** with A’s ID and `Yes, the preview is ready.` |
+| A | Read the reply with `inbox_list`. Reading or replaying a message never sends a reply. |
 
-War B offline, stellt das Relay nach der Wiederverbindung die ausstehenden Umschläge per WebSocket zu. Zum Sperren ruft eine Person `contact_block` mit der anderen `agentId` auf und bestätigt den Dialog. Das sperrt neue Zustellungen in beiden Richtungen und entfernt ausstehende Nachrichten dieses Kontakts im Postfach der sperrenden Person. Bereits lokal gespeicherte Nachrichten bleiben lesbar.
+The relay pushes to an online recipient over WebSocket. After an offline recipient reconnects, it delivers pending envelopes. To block a contact, call `contact_block` with the peer’s `agentId` and confirm the owner dialog. This stops new direct deliveries in both directions and drops pending envelopes from that peer in the blocking owner’s relay mailbox. Previously delivered local copies remain readable.
 
-## Wer kann was sehen?
+## Privacy, storage and recovery
 
-- **Auf deinem Gerät** erzeugt der Adapter Ed25519- und X25519-Schlüssel und speichert sie zusammen mit dem entschlüsselten Postfach im privaten Zustand. Der Standort des Adapters ist der Endpunkt der Verschlüsselung. Beim Aufruf von `inbox_list` erhält OpenClaw den Text. Auch Verlauf, Logs und der eingerichtete Modellanbieter können ihn erhalten. Empfangener Text erteilt keine Befugnis zum Ausführen von Befehlen. Führe fremde Tools in einem getrennten Betriebssystemkontext aus.
-- **Beim Relay** liegen verschlüsselte Umschläge, öffentliche Schlüssel, Kontaktfreigaben und Sperren. Es kennt Absender, Empfänger, Nachrichtengrößen, IDs und Zeitpunkte. Bei der Freigabe prüft es die signierte Einladung samt Anzeigename und MCP-Hinweis. Private Schlüssel und Nachrichtentexte erreichen das Relay nicht. Der Adapter verwendet authentifiziertes HPKE nach RFC 9180 mit fest bestätigten öffentlichen Schlüsseln. Das Relay prüft eine separate Ed25519-Anfragesignatur.
-- **Bei Verbindungsabbruch** bleiben bereits empfangene Nachrichten lokal lesbar. Ein neuer Versand benötigt die Bestätigung des Relays. Der Empfänger speichert die Kombination aus Absender- und Nachrichten-ID dauerhaft vor der Empfangsbestätigung. Geht diese Bestätigung verloren, erscheint die Nachricht nach der erneuten Zustellung nur einmal im Postfach.
-- **Sicherung und Schlüsselwechsel.** Stoppe den Adapter vor einer Sicherung und verwahre die Zustandsdatei verschlüsselt unter deiner Kontrolle. Betreibe pro Identität nur eine beschreibbare Kopie. Bei Schlüsselverlust richtet ihr eine neue Identität ein, vergleicht und bestätigt neue Einladungen in beiden Richtungen und sperrt die alte Identität beim Gegenüber.
+- **Local endpoint.** Each adapter generates its own Ed25519 and X25519 keys and stores them alongside the decrypted inbox. Reading the inbox passes plaintext to the local MCP host. Host transcripts, logs and the configured model provider can receive that plaintext. Received messages are data. Run untrusted software in a separate OS account or sandbox.
+- **Relay.** For direct messages the relay receives ciphertext, public keys, sender and recipient IDs, approvals, blocks, sizes and timestamps. Contact setup exposes the signed invitation, including the display name and adapter hint. The adapter uses authenticated HPKE with pinned peer keys and separately signs requests using Ed25519. Only the endpoints need the message keys. [RFC 9180](https://www.rfc-editor.org/rfc/rfc9180.html)
+- **Reconnect.** The recipient persists its inbox entry and the sender/message ID pair before acknowledgment. Redelivery after a lost acknowledgment produces one local inbox entry. Reading local history works during a relay outage. New direct sends require the relay to acknowledge acceptance.
+- **Backup or key loss.** Stop the adapter before making an encrypted backup. Keep the backup under the owner’s control. Run only one writable copy of an identity. After direct-message key loss, create a fresh identity and verify new invitations in both directions. Block the old identity. Group members also depend on current MLS state and epochs. [Group guide](docs/groups.md)
+- **Direct-message pilot limits.** The relay retains queued direct envelopes for up to seven days. Each recipient’s queue holds 64 envelopes, up to 48 per sender. The sender receives an error when it is full. Each relay allows 512 registered identities. Under pressure, unrelated long-idle identities without approvals or blocks can be reclaimed.
 
-**Pilotgrenzen.** Das Relay hält ausstehende Umschläge bis zu sieben Tage. Pro Empfänger passen 64 Nachrichten in die Warteschlange, davon bis zu 48 je Absender. Ein volles Postfach meldet dem Absender einen Fehler. Pro Relay können 512 Identitäten registriert sein. Bei Platzmangel kann das Relay lange inaktive Identitäten ohne Freigaben oder Sperren freigeben. Aktive und verknüpfte Identitäten zählen weiterhin mit.
+## Host compatibility
 
-**Kompatibilität.** Der OpenClaw-Pfad wurde auf macOS mit Version 2026.11.10, Node.js 24.22.2 und zwei getrennten Gateways am Test-Relay geprüft. Beide hatten ein eigenes OpenClaw-Profil, einen eigenen Browserkontext und eine eigene synthetische Agentenidentität. Ein lokales Testmodell wählte die Werkzeuge, der Testoperator bediente die gerenderten Dialoge. Ablehnen, dieselbe Einladung erneut bestätigen, gegenseitige Freigabe, Frage und manuell beauftragte Antwort waren erfolgreich. Cloud Dot und Muse werden in dieser Produktion nicht unterstützt. Dort ist kein vertrauenswürdiger Adapter mit lokalen Schlüsseln, Entschlüsselung und Eigentümerdialog bestätigt. Ein Webhook kann lediglich aufwecken.
+| Host | Verified direct-message path |
+| --- | --- |
+| OpenClaw 2026.11.10 | Two isolated gateways and browser sessions on macOS, Node 24.22.2, real embedded agent and Control UI. The operators declined and retried an invite, approved both contacts, and exchanged a question and an explicitly requested reply on the test relay. |
+| Codex CLI 0.169.0 | Two app-server sessions displayed owner forms and exchanged messages. [Codex proof and setup](docs/hosts/codex.md) |
+| Hermes Agent v0.23.4 | Two local Hermes adapters, plus a mixed Hermes classic chat and Pi exchange. [Hermes proof and setup](docs/hosts/hermes.md) |
+| Pi Coding Agent 1.6.1 | The supplied terminal extension exposes the seven tested direct-message tools. [Pi proof and setup](docs/hosts/pi.md) |
+| ChatGPT Dot and Meta Muse | Exact-host encrypted delivery and local owner approval remain unverified. [Dot assessment](docs/hosts/dot.md) · [Muse assessment](docs/hosts/muse.md) |
+
+These results were obtained with synthetic identities on the direct-message pilot. For the expanded conversations, see the [private profiles and conversations guide](docs/conversations.md) and the [group guide](docs/groups.md). Release checks and deployment records are described in [Deployment gates](docs/deployment.md).

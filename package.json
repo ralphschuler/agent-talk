@@ -13,7 +13,9 @@
     "typecheck": "cf workers types && tsc --noEmit",
     "typecheck:adapter": "tsc --ignoreConfig --noEmit --target es2024 --module preserve --moduleResolution bundler --types node --skipLibCheck --allowImportingTsExtensions adapter/mcp-adapter.ts",
     "mcp": "node --import tsx adapter/mcp-adapter.ts",
-    "smoke:mcp": "node scripts/smoke-mcp.mjs"
+    "smoke:mcp": "node scripts/smoke-mcp.mjs",
+    "test:mls": "node --import tsx --test test/node/*.mjs",
+    "posttest": "npm run test:mls"
   },
   "dependencies": {
     "@hpke/chacha20poly1305": "1.8.1",
@@ -21,6 +23,7 @@
     "@hpke/dhkem-x25519": "1.8.1",
     "@modelcontextprotocol/sdk": "1.32.2",
     "@noble/ed25519": "3.0.0",
+    "ts-mls": "1.6.4",
     "ws": "8.21.0",
     "zod": "4.6.6"
   },
@@ -38,7 +41,10 @@
   },
   "overrides": {
     "vite": "npm:@voidzero-dev/vite-plus-core@1.4.0",
-    "vitest": "5.0.5"
+    "vitest": "5.0.5",
+    "ts-mls@1.6.4": {
+      "@hpke/chacha20poly1305": "$@hpke/chacha20poly1305"
+    }
   },
   "engines": {
     "node": "^22.23.0 || ^24.22.0 || ^26.12.0"

@@ -52,24 +52,24 @@ export function asInvite(value: unknown, origin: string, now = Date.now()): Invi
 
 export function asEnvelope(value: unknown): CipherEnvelope | null {
   if (!fields(value, ["version", "id", "senderId", "recipientId", "createdAt", "enc", "ciphertext"])
-      || value.version !== 1 || !identifier(value.id) || !agentId(value.senderId) || !agentId(value.recipientId)
+      || (value.version !== 1 && value.version !== 2) || !identifier(value.id) || !agentId(value.senderId) || !agentId(value.recipientId)
       || value.senderId === value.recipientId || !Number.isSafeInteger(value.createdAt)
       || !canonicalBytes(value.enc, 32) || !canonicalBytes(value.ciphertext, 16, 48_016)) return null;
   return value as CipherEnvelope;
 }
 
-export async function readJson(request: Request): Promise<unknown> {
-  if (Number(request.headers.get("content-length")) > REQUEST_LIMIT
+export async function readJson(request: Pick<Request, "body" | "headers">, limit = REQUEST_LIMIT): Promise<unknown> {
+  if (Number(request.headers.get("content-length")) > limit
       || request.headers.get("content-type")?.split(";")[0].trim().toLowerCase() !== "application/json") return null;
   const reader = request.body?.getReader();
   if (!reader) return null;
-  const buffer = new Uint8Array(REQUEST_LIMIT);
+  const buffer = new Uint8Array(limit);
   let length = 0;
   try {
     while (true) {
       const chunk = await reader.read();
       if (chunk.done) break;
-      if (length + chunk.value.length > REQUEST_LIMIT) {
+      if (length + chunk.value.length > limit) {
         await reader.cancel();
         return null;
       }

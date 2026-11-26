@@ -3,6 +3,7 @@ import { CipherSuite } from "@hpke/core";
 import { DhkemX25519HkdfSha256, HkdfSha256 } from "@hpke/dhkem-x25519";
 import * as ed from "@noble/ed25519";
 import { signRequestWithKey, verifyRequest } from "./auth.ts";
+import { decodeLetter, encodeLetter, type DirectLetter, validText } from "./direct.ts";
 import {
   agentIdFromSigningKey,
   base64url,
@@ -65,26 +66,44 @@ export async function sealEnvelope(
   plaintext: string,
   createdAt = Date.now(),
 ): Promise<CipherEnvelope> {
-  if (!plaintext.isWellFormed() || plaintext.length === 0 || plaintext.length > MAX_TEXT_LENGTH) {
+  if (!validText(plaintext)) {
     throw new Error("Expected 1–12000 characters of Unicode text.");
   }
-  const header = { version: 1 as const, id, senderId: identity.agentId, recipientId: recipient.agentId, createdAt };
+  return sealBytes(identity, recipient, id, createdAt, 1, new TextEncoder().encode(plaintext));
+}
+
+export function sealDirect(identity: LocalIdentity, recipient: AgentIdentity, id: string, letter: DirectLetter, createdAt = Date.now()): Promise<CipherEnvelope> {
+  return sealBytes(identity, recipient, id, createdAt, 2, encodeLetter(letter, { id, senderId: identity.agentId, recipientId: recipient.agentId }));
+}
+
+async function sealBytes(identity: LocalIdentity, recipient: AgentIdentity, id: string, createdAt: number, version: 1|2, bytes: Uint8Array): Promise<CipherEnvelope> {
+  const header = { version, id, senderId: identity.agentId, recipientId: recipient.agentId, createdAt };
   const senderKey = {
     privateKey: await suite.kem.deserializePrivateKey(fromBase64url(identity.encryptionSecretKey)),
     publicKey: await suite.kem.deserializePublicKey(fromBase64url(identity.encryptionPublicKey)),
   };
   const recipientPublicKey = await suite.kem.deserializePublicKey(fromBase64url(recipient.encryptionPublicKey));
   const context = await suite.createSenderContext({ recipientPublicKey, senderKey });
-  const ciphertext = await context.seal(new TextEncoder().encode(plaintext), envelopeAad(header));
+  const ciphertext = await context.seal(bytes, envelopeAad(header));
   return { ...header, enc: base64url(new Uint8Array(context.enc)), ciphertext: base64url(new Uint8Array(ciphertext)) };
 }
 
-export async function openEnvelope(identity: LocalIdentity, sender: AgentIdentity, envelope: CipherEnvelope): Promise<string> {
+async function openBytes(identity: LocalIdentity, sender: AgentIdentity, envelope: CipherEnvelope): Promise<ArrayBuffer> {
   if (envelope.recipientId !== identity.agentId || envelope.senderId !== sender.agentId) throw new Error("envelope route mismatch");
   const recipientKey = await suite.kem.deserializePrivateKey(fromBase64url(identity.encryptionSecretKey));
   const senderPublicKey = await suite.kem.deserializePublicKey(fromBase64url(sender.encryptionPublicKey));
   const context = await suite.createRecipientContext({ recipientKey, senderPublicKey, enc: fromBase64url(envelope.enc) });
-  const plaintext = await context.open(fromBase64url(envelope.ciphertext), envelopeAad(envelope));
+  return context.open(fromBase64url(envelope.ciphertext), envelopeAad(envelope));
+}
+
+export async function openDirect(identity: LocalIdentity, sender: AgentIdentity, envelope: CipherEnvelope): Promise<DirectLetter> {
+  if (envelope.version !== 2) throw new Error("Expected a typed direct envelope.");
+  return decodeLetter(await openBytes(identity, sender, envelope), envelope);
+}
+
+export async function openEnvelope(identity: LocalIdentity, sender: AgentIdentity, envelope: CipherEnvelope): Promise<string> {
+  if (envelope.version !== 1) throw new Error("Expected a legacy direct envelope.");
+  const plaintext = await openBytes(identity,sender,envelope);
   const text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(plaintext);
   if (text.length === 0 || text.length > MAX_TEXT_LENGTH) throw new Error("Invalid message length.");
   return text;

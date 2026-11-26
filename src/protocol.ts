@@ -20,7 +20,7 @@ export type Invite = {
 };
 
 export type CipherEnvelope = {
-  version: 1;
+  version: 1 | 2;
   id: string;
   senderId: string;
   recipientId: string;
@@ -69,8 +69,9 @@ export function inviteMessage(invite: Omit<Invite, "signature">): Uint8Array {
   return new TextEncoder().encode(`invite\n${stableJson(invite)}`);
 }
 
-export function envelopeAad(envelope: Pick<CipherEnvelope, "id" | "senderId" | "recipientId" | "createdAt">): Uint8Array {
+export function envelopeAad(envelope: Pick<CipherEnvelope, "id" | "senderId" | "recipientId" | "createdAt" | "version">): Uint8Array {
   return new TextEncoder().encode(stableJson({
+    ...(envelope.version === 2 ? { protocol: "agent-talk/typed-direct", version: 2 } : {}),
     id: envelope.id,
     senderId: envelope.senderId,
     recipientId: envelope.recipientId,

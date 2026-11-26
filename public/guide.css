@@ -55,3 +55,7 @@ footer { border-top: 1px solid var(--line); padding: 1.3rem 0 2.4rem; color: var
   body { width: calc(100% - 1.75rem); }
   nav a { font-size: .86rem; }
 }
+
+.host-setup { max-width: 70ch; margin-top: 1.3rem; border-block: 1px solid var(--line); }
+.host-setup summary { padding: .8rem 0; color: var(--paper); cursor: pointer; font-weight: 700; }
+.host-setup p { margin-top: .35rem; }

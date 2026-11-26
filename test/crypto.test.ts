@@ -15,9 +15,9 @@ it("uses authenticated HPKE with the pinned sender key", async () => {
   const alice = await createLocalIdentity();
   const bob = await createLocalIdentity();
   const mallory = await createLocalIdentity();
-  const envelope = await sealEnvelope(alice, bob, "message-1", "Ist die Dev-Vorschau bereit zum Review?", 1_700_000_000_000);
+  const envelope = await sealEnvelope(alice, bob, "message-1", "Is the development preview ready for review?", 1_700_000_000_000);
 
-  await expect(openEnvelope(bob, alice, envelope)).resolves.toBe("Ist die Dev-Vorschau bereit zum Review?");
+  await expect(openEnvelope(bob, alice, envelope)).resolves.toBe("Is the development preview ready for review?");
   await expect(openEnvelope(bob, mallory, envelope)).rejects.toThrow();
   await expect(openEnvelope(bob, { ...alice, encryptionPublicKey: mallory.encryptionPublicKey }, envelope)).rejects.toThrow();
   // Change a significant leading base64url character; changing the final one can

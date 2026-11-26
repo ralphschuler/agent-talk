@@ -1,3 +1,5 @@
+import { GroupDelivery } from "./group-relay.ts";
+import { GROUP_REQUEST_LIMIT, groupHttpAction, validGroupRequest } from "./group-protocol.ts";
 import { DurableObject } from "cloudflare:workers";
 import { authMessage, fromBase64url, inviteMessage, type AgentIdentity, type CipherEnvelope } from "./protocol.ts";
 import { agentId, asEnvelope, asIdentity, asInvite, canonicalBytes, CLOCK_SKEW, DAY, fields, identifier, readJson, record } from "./validation.ts";
@@ -41,7 +43,8 @@ export default {
     const url = new URL(request.url);
     if (url.pathname === "/healthz" && request.method === "GET") return json({ ok: true, protocol: 1, release: env.RELEASE_SHA });
     const action = url.pathname.slice("/v1/".length);
-    if (!url.pathname.startsWith("/v1/") || !["register", "socket", "contact/approve", "contact/block", "send"].includes(action)) return fail("not found", 404);
+    const group = ["group/submit","group/sync","group/ack"].includes(action);
+    if (!url.pathname.startsWith("/v1/") || (!group && !["register", "socket", "contact/approve", "contact/block", "send"].includes(action))) return fail("not found", 404);
     const socket = action === "socket";
     if (request.method !== (socket ? "GET" : "POST")) return fail("method not allowed", 405);
     if (socket && request.headers.get("upgrade")?.toLowerCase() !== "websocket") return fail("WebSocket Upgrade required", 426);
@@ -50,20 +53,25 @@ export default {
     const signature = request.headers.get("x-agent-signature") ?? "";
     if (!agentId(actor) || !/^\d{13}$/u.test(timestamp) || Math.abs(Number(timestamp) - Date.now()) > CLOCK_SKEW
         || !canonicalBytes(signature, 64)) return fail("invalid authentication metadata", 401);
-    const payload = socket ? {} : await readJson(request);
+    const payload = socket ? {} : await readJson(request, group ? GROUP_REQUEST_LIMIT : undefined);
     if (!record(payload)) return fail("invalid or oversized JSON");
     // Validate the exact wire shape before signing or forwarding any user-controlled data.
     if (action === "register" && (!fields(payload, ["identity"]) || asIdentity(payload.identity)?.agentId !== actor)) return fail("invalid identity");
-    if (action === "contact/approve" && (!fields(payload, ["invite"]) || !asInvite(payload.invite, url.origin))) return fail("invalid invite");
+    if (action === "contact/approve") {
+      const keys = payload.requireReciprocal === true ? ["invite","requireReciprocal"] : ["invite"];
+      if (!fields(payload, keys) || !asInvite(payload.invite, url.origin)) return fail("invalid invite");
+    }
     if (action === "contact/block" && (!fields(payload, ["peerId"]) || !agentId(payload.peerId) || payload.peerId === actor)) return fail("invalid peer");
     if (action === "send" && (!fields(payload, ["envelope"]) || asEnvelope(payload.envelope)?.senderId !== actor)) return fail("invalid envelope");
-    if (!await signed(actor.slice(4), signature, authMessage(action, actor, timestamp, payload))) return fail("authentication failed", 401);
+    if (group && !validGroupRequest(action, payload, url.origin)) return fail("invalid group request");
+    if (!await signed(actor.slice(4), signature, authMessage(group ? groupHttpAction(action, url.origin) : action, actor, timestamp, payload))) return fail("authentication failed", 401);
     const directory = env.DIRECTORY.getByName("directory");
     if (action === "register") return post(directory, "/register", { identity: payload.identity });
     const auth = await post(directory, "/admit", { actor, signature, expires: Number(timestamp) + CLOCK_SKEW });
     if (!auth.ok) return auth;
+    if (group) return post(directory, "/" + action, {actor,payload,origin:url.origin});
     if (socket) return env.MAILBOX.getByName(actor).fetch("https://internal/socket", { headers: { Upgrade: "websocket" } });
-    if (action === "contact/approve") return post(directory, "/approve", { actor, invite: payload.invite, origin: url.origin });
+    if (action === "contact/approve") return post(directory, "/approve", { actor, invite: payload.invite, origin: url.origin, requireReciprocal: payload.requireReciprocal === true });
     if (action === "contact/block") {
       const peer = payload.peerId as string;
       const blocked = await post(directory, "/block", { actor, peer });
@@ -84,6 +92,7 @@ export default {
 } satisfies ExportedHandler<Env>;
 
 export class Directory extends DurableObject<Env> {
+  private readonly groups = new GroupDelivery(this.ctx, this.env.MAILBOX);
   private readonly sql = this.ctx.storage.sql;
 
   constructor(ctx: DurableObjectState, env: Env) {
@@ -129,6 +138,7 @@ export class Directory extends DurableObject<Env> {
     const needed = count - IDENTITY_LIMIT + 1;
     this.sql.exec(`DELETE FROM identities WHERE agent_id IN (
       SELECT i.agent_id FROM identities i WHERE i.last_active < ?
+      AND NOT EXISTS (SELECT 1 FROM g_clients WHERE agent = i.agent_id)
       AND NOT EXISTS (SELECT 1 FROM approvals WHERE owner_id = i.agent_id)
       AND NOT EXISTS (SELECT 1 FROM approvals WHERE peer_id = i.agent_id)
       AND NOT EXISTS (SELECT 1 FROM blocks WHERE owner_id = i.agent_id)
@@ -142,9 +152,11 @@ export class Directory extends DurableObject<Env> {
     this.sql.exec("INSERT INTO identities (agent_id, signing_key, encryption_key, registered_at, last_active) VALUES (?, ?, ?, ?, ?)", identity.agentId, identity.signingPublicKey, identity.encryptionPublicKey, now, now);
   }
 
+  async alarm() { await this.groups.alarm(); }
+
   async fetch(request: Request): Promise<Response> {
     const path = new URL(request.url).pathname;
-    const body = await readJson(request);
+    const body = await readJson(request, path.startsWith("/group/") ? GROUP_REQUEST_LIMIT + 256 : undefined);
     if (!record(body)) return fail("invalid input");
     if (path === "/register") {
       const identity = asIdentity(body.identity);
@@ -162,6 +174,9 @@ export class Directory extends DurableObject<Env> {
     }
     const actor = body.actor;
     if (!agentId(actor)) return fail("invalid actor");
+    if (["/group/submit","/group/sync","/group/ack"].includes(path) && record(body.payload) && typeof body.origin === "string") {
+      return this.groups.handle(path.slice(1), actor, body.payload, body.origin);
+    }
     if (path === "/migration-contacts") {
       // Internal, one-time mailbox migration. The public router exposes no contact-list endpoint.
       const allowed = this.sql.exec(`SELECT a.peer_id FROM approvals a JOIN approvals b
@@ -190,6 +205,7 @@ export class Directory extends DurableObject<Env> {
       const peer = invite.issuer.agentId;
       const [identity] = this.sql.exec("SELECT encryption_key FROM identities WHERE agent_id = ?", peer);
       if ((identity && identity.encryption_key !== invite.issuer.encryptionPublicKey) || this.blocked(actor, peer)) return fail("contact unavailable", 403);
+      if (body.requireReciprocal === true && !this.sql.exec("SELECT 1 FROM approvals WHERE owner_id=? AND peer_id=?", peer, actor).toArray().length) return fail("replacement requires reciprocal approval", 403);
       const now = Date.now();
       if (invite.expiresAt <= now) return fail("expired invite");
       this.sql.exec("DELETE FROM consumed_invites WHERE expires < ?", now);
@@ -216,7 +232,10 @@ export class Directory extends DurableObject<Env> {
     if (path === "/block") {
       const related = this.sql.exec("SELECT 1 FROM approvals WHERE (owner_id=? AND peer_id=?) OR (owner_id=? AND peer_id=?) LIMIT 1", actor, peer, peer, actor).toArray();
       if (!related.length) return fail("unknown contact", 404);
-      this.sql.exec("INSERT OR IGNORE INTO blocks VALUES (?, ?, ?)", actor, peer, Date.now());
+      this.ctx.storage.transactionSync(() => {
+        this.sql.exec("INSERT OR IGNORE INTO blocks VALUES (?, ?, ?)", actor, peer, Date.now());
+        this.groups.block(actor, peer);
+      });
       return new Response(null, { status: 204 });
     }
     if (path === "/permit") {
@@ -310,6 +329,12 @@ export class Mailbox extends DurableObject<Env> {
 
   async fetch(request: Request): Promise<Response> {
     const path = new URL(request.url).pathname;
+    if (path === "/group-wake" && request.method === "POST") {
+      for (const socket of this.ctx.getWebSockets()) {
+        try { socket.send('{"type":"group-wake"}'); } catch { try { socket.close(1011); } catch { /* already closed */ } }
+      }
+      return new Response(null, {status:204});
+    }
     if (path === "/socket") {
       if (this.ctx.getWebSockets().length >= 4) return fail("socket limit", 429);
       const [client, server] = Object.values(new WebSocketPair());

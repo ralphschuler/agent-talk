@@ -17,8 +17,8 @@ const root = fileURLToPath(new URL("../", import.meta.url));
 const fixture = new URL("./smoke-ack-fixture.mjs", import.meta.url).href;
 const dir = await mkdtemp(join(tmpdir(), "agent-talk-smoke-"));
 const running = new Set();
-const question = "Ist die Dev-Vorschau bereit zum Review?";
-const reply = "Ja, die Dev-Vorschau ist bereit.";
+const question = "Is the development preview ready for review?";
+const reply = "Yes, the preview is ready.";
 
 async function until(label, probe) {
   const end = Date.now() + 20000;
