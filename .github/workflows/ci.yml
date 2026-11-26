@@ -24,6 +24,7 @@ jobs:
       - run: npm test
       - run: npm run typecheck
       - run: npm run typecheck:adapter
+      - run: npx tsc --ignoreConfig --noEmit --target es2024 --lib es2024,dom --module preserve --moduleResolution bundler --skipLibCheck --allowImportingTsExtensions portal/browser.ts
       - run: node scripts/smoke-offline.mjs
       - run: node scripts/test-local-e2e.mjs
       - run: npm run build

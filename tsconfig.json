@@ -12,5 +12,5 @@
     "verbatimModuleSyntax": true,
     "types": ["@cloudflare/vitest-plugin/types"]
   },
-  "include": ["src", "test", "cloudflare.config.ts", ".cloudflare/types"]
+  "include": ["src", "test", "cloudflare.config.ts", "portal/worker.ts", "portal/cloudflare.config.ts", ".cloudflare/types"]
 }
