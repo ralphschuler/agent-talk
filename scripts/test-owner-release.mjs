@@ -16,7 +16,7 @@ try {
     PORTAL_STORE: { worker: "agent-talk-owner-test", exportName: "PortalStore" },
   }, exports: { PortalStore: { storage: "sqlite" } } };
   await writeFile(join(outputDirectory, "worker.config.json"), JSON.stringify(config));
-  for (const scenario of ["initial", "owned", "foreign", "shared"]) {
+  for (const scenario of ["initial", "owned", "foreign", "shared", "race"]) {
     const output = join(root, scenario + "-output");
     const trace = join(root, scenario + "-trace");
     await writeFile(output, "");
@@ -29,9 +29,10 @@ try {
     assert.equal(result.stdout.includes("synthetic-token"), false);
     assert.equal(result.stderr.includes("synthetic-token"), false);
     const requests = await readFile(trace, "utf8");
-    if (scenario === "foreign" || scenario === "shared") {
+    if (scenario === "foreign" || scenario === "shared" || scenario === "race") {
       assert.notEqual(result.status, 0);
-      assert.equal(requests.includes("POST "), false);
+      assert.equal(requests.includes("POST "), scenario === "race");
+      assert.equal(await readFile(output, "utf8"), "");
     } else {
       assert.equal(result.status, 0, result.stderr);
       assert.equal((await readFile(output, "utf8")).trim(), "initial=" + (scenario === "initial"));

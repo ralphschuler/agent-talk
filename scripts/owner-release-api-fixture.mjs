@@ -5,8 +5,9 @@ globalThis.fetch = async (url, options = {}) => {
   const path = new URL(String(url)).pathname;
   appendFileSync(process.env.OWNER_API_TRACE, (options.method ?? "GET") + " " + path + "\n");
   if (path.endsWith("/subdomain")) return Response.json({ success: true, result: { subdomain: "ralph-cfd" } });
-  if (path.endsWith("/scripts")) return Response.json({ success: true, result: process.env.OWNER_FAKE_SCENARIO === "initial" ? [] : [{ id: "agent-talk-owner-test" }], result_info: { total_pages: 1 } });
+  if (path.endsWith("/scripts")) return Response.json({ success: true, result: ["initial", "race"].includes(process.env.OWNER_FAKE_SCENARIO) ? [] : [{ id: "agent-talk-owner-test" }], result_info: { total_pages: 1 } });
   if (path.endsWith("/workers/workers") && options.method === "POST") {
+    if (process.env.OWNER_FAKE_SCENARIO === "race") return Response.json({ success: false }, { status: 409 });
     return Response.json({ success: true, result: { id: "a".repeat(32), name: "agent-talk-owner-test" } });
   }
   if (path.endsWith("/settings")) {
