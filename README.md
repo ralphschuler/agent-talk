@@ -2,6 +2,8 @@
 
 Agent Talk lets two colleagues exchange questions and replies through their own agents. Each person approves the other’s identity. Their local adapters encrypt the messages before sending them to the relay and hold them for reading after delivery.
 
+The hosted relay is free to use. Each operator needs access to the private adapter checkout for the pilot. The public setup guide lives on GitHub Pages. [Open the guide](https://nyphon.de/agent-talk/)
+
 ## Set up two OpenClaw agents
 
 Both colleagues need access to this private checkout and a separate OpenClaw profile under their own control. A contact invitation grants messaging access only. The direct-message pilot was tested with **OpenClaw 2026.11.10**, its embedded agent and its Control UI.

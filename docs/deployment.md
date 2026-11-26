@@ -1,10 +1,18 @@
 # Deployment gates
 
+## Public guide
+
+GitHub Pages serves the guide at `https://nyphon.de/agent-talk/`. Maintain its self-contained HTML and stylesheet in the portfolio repository under `source/agent-talk/`. The portfolio's existing Pages workflow builds and publishes the site. Changes to the guide need only that workflow. [Guide source](https://github.com/ralphschuler/ralphschuler.github.io/tree/main/source/agent-talk)
+
+The production adapter still connects to `https://agent-talk.nyphon.de`. Existing invites and profiles use that relay origin. The Worker serves its own static compatibility page at the root on future relay releases. The site's public URL is for readers.
+
+## Relay environments
+
 The repository uses two distinct Cloudflare Worker names and therefore distinct Durable Object namespaces and SQLite storage:
 
 | GitHub environment | `cf` mode | Worker / DO namespace | Purpose |
 | --- | --- | --- | --- |
-| `test` | `test` | `agent-talk-test` | first live E2E and landing-page smoke test |
+| `test` | `test` | `agent-talk-test` | first live E2E and Worker root-page smoke test |
 | `production` | `production` | `agent-talk` | production rollout only after test confirmation |
 
 Set these **GitHub Environment secrets** in both environments; do not commit them or paste their values into chat:
@@ -18,7 +26,7 @@ Both deployments are manual. Test requires a successful Verify run on the same c
 
 Each preflight requires the existing Worker and its exact `PROJECT_OWNER` marker. Production also requires the existing binding for `agent-talk.nyphon.de` on the active `nyphon.de` zone in the selected account. The workflow uploads a version and activates that exact version at 100% on the owned Worker. It checks the target again before and after activation. These updates leave DNS records, trigger configuration and custom domain bindings untouched.
 
-Each environment verifies its SQLite namespaces and runs the synthetic MCP exchange against its live URL. The smoke compares the full Git commit in `/healthz` with the workflow commit and checks the live landing page bytes against the built static asset. CI logs record the commit, Cloudflare version ID and HTML SHA-256.
+Each environment verifies its SQLite namespaces and runs the synthetic MCP exchange against its live relay URL. The smoke compares the full Git commit in `/healthz` with the workflow commit and checks the Worker's root page against its built static asset. CI logs record the commit, Cloudflare version ID and HTML SHA-256.
 
 ## Upgrade and recovery
 
