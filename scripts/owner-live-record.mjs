@@ -1,11 +1,11 @@
 // A local observation, not production approval. Only whitelisted synthetic
 // metadata is serialized; no plaintext, keys, OAuth material or cookies.
 import assert from "node:assert/strict";
-import { randomBytes } from "node:crypto";
+import { createPrivateKey, createPublicKey, randomBytes, sign } from "node:crypto";
 import { link, open, unlink } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 
-export async function writeSanitizedObservation({ path, release, deployment, storage, routing, materialDigests, mode = "staging-interactive" }) {
+export async function writeSanitizedObservation({ path, release, deployment, storage, routing, materialDigests, signingSecretKey, mode = "staging-interactive" }) {
   assert.ok(typeof path === "string" && path.length > 0, "An output path is required.");
   assert.match(release ?? "", /^[a-f0-9]{40}$/, "An exact release is required.");
   assert.ok(["staging-interactive", "synthetic-fixture"].includes(mode), "Invalid observation mode.");
@@ -25,13 +25,20 @@ export async function writeSanitizedObservation({ path, release, deployment, sto
     materialDigests.filter(item => item.kind === "key").length >= 16 &&
     new Set(materialDigests.map(item => item.kind + ":" + item.length + ":" + item.sha256)).size === materialDigests.length,
   "Invalid synthetic material digests.");
-  const record = { schema: "agent-talk-staging-observation-v1", mode, release,
+  assert.match(signingSecretKey ?? "", /^[A-Za-z0-9_-]{43}$/, "A disposable agent signing key is required.");
+  const seed = Buffer.from(signingSecretKey, "base64url");
+  assert.ok(seed.length === 32 && seed.toString("base64url") === signingSecretKey);
+  const privateKey = createPrivateKey({ key: Buffer.concat([Buffer.from("302e020100300506032b657004220420", "hex"), seed]), format: "der", type: "pkcs8" });
+  const publicKey = createPublicKey(privateKey).export({ type: "spki", format: "der" }).subarray(-32).toString("base64url");
+  assert.equal("at1_" + publicKey, routing.agentId, "Signing key does not match the synthetic sender.");
+  const unsigned = { schema: "agent-talk-staging-observation-v1", mode, release,
     deployment: { deploymentId: deployment.deploymentId, versionId: deployment.versionId },
     storage: { ownerRows: 1, mailboxRows: 1, groupRows: 1 },
     routing: Object.fromEntries(["agentId", "deviceId", "recipientId", "groupId", "offlineMessageId", "groupMessageId"].map(name => [name, routing[name]])),
     materialDigests: materialDigests.map(({ kind, length, sha256 }) => ({ kind, length, sha256 })),
     observedAt: new Date().toISOString(),
     productionApproval: false };
+  const record = { ...unsigned, signature: sign(null, Buffer.from(JSON.stringify(unsigned)), privateKey).toString("base64url") };
   const temporary = join(dirname(path), "." + basename(path) + "." + randomBytes(16).toString("hex") + ".tmp");
   let file;
   let created = false;

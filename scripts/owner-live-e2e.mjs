@@ -4,7 +4,7 @@ import { checkOfflineReplay, checkPortalRetry, inspectOfflineSyntheticStorage, p
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createRequire } from "node:module";
-import { lstat, mkdtemp, rm } from "node:fs/promises";
+import { lstat, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -180,9 +180,10 @@ async function main() {
     assert.ok(storageObservation, "The staging storage inspection did not run.");
     assert.deepEqual(await getStagingDeployment({ account, token, release: settings.release }), expectedDeployment,
       "The staging deployment changed during the interactive scenario.");
+    const identity = JSON.parse(await readFile(join(dir, "a1.json"), "utf8")).identity;
     await writeSanitizedObservation({ path: evidencePath, release: settings.release,
       deployment: expectedDeployment, storage: storageObservation.result, routing: storageObservation.routing,
-      materialDigests: storageObservation.materialDigests });
+      materialDigests: storageObservation.materialDigests, signingSecretKey: identity.signingSecretKey });
     console.log("Interactive staging checks passed and a sanitized local observation was written. Production remains gated.");
   } finally {
     if (browser) await browser.close().catch(() => {});

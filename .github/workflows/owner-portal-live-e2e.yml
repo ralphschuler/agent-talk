@@ -1,0 +1,75 @@
+name: Owner portal live evidence verification
+run-name: Owner live evidence ${{ inputs.evidence_sha256 }} ${{ inputs.version_id }} ${{ inputs.deployment_id }}
+on:
+  workflow_dispatch:
+    inputs:
+      observation:
+        description: Base64url-encoded sanitized runner observation
+        required: true
+        type: string
+      evidence_sha256:
+        description: Fingerprint of the synthetic routing, material and deployment
+        required: true
+        type: string
+      version_id:
+        description: Observed staging version ID
+        required: true
+        type: string
+      deployment_id:
+        description: Observed staging deployment ID
+        required: true
+        type: string
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: owner-live-evidence-${{ inputs.evidence_sha256 }}
+  cancel-in-progress: false
+jobs:
+  acceptance:
+    name: Live encrypted acceptance
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    # A real review history is checked below. An unprotected environment cannot pass.
+    environment: test
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+      OWNER_LIVE_OBSERVATION: ${{ inputs.observation }}
+      OWNER_LIVE_HASH: ${{ inputs.evidence_sha256 }}
+      OWNER_LIVE_VERSION: ${{ inputs.version_id }}
+      OWNER_LIVE_DEPLOYMENT: ${{ inputs.deployment_id }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+      - name: Human GitHub sign-in
+        run: node scripts/owner-live-workflow-verify.mjs
+      - name: Separate agents and accounts
+        run: echo 'The maintainer attested the locally executed scenario; this workflow did not execute it.'
+      - name: Encrypted direct and group messages
+        run: echo 'The maintainer attested the locally executed scenario; this workflow did not execute it.'
+      - name: Revocation and retry
+        run: echo 'The maintainer attested the locally executed scenario; this workflow did not execute it.'
+  storage:
+    name: Read-only staging storage inspection
+    needs: acceptance
+    runs-on: ubuntu-latest
+    environment: test
+    timeout-minutes: 10
+    env:
+      OWNER_LIVE_OBSERVATION: ${{ inputs.observation }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+      - name: Inspect staging SQLite ciphertext
+        run: node scripts/owner-live-workflow-storage.mjs

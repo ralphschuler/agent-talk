@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { pathToFileURL } from "node:url";
+import { getStagingDeployment } from "./owner-live-storage-check.mjs";
 
 const repo = "ralphschuler/agent-talk";
 const workflow = ".github/workflows/owner-portal-live-e2e.yml";
@@ -13,9 +14,10 @@ const requiredJobs = new Map([
   ["Read-only staging storage inspection", ["Inspect staging SQLite ciphertext"]],
 ]);
 
-export async function verifyLiveGate({ release, token, fetcher = fetch }) {
+export async function verifyLiveGate({ release, token, account, cloudflareToken, fetcher = fetch, now = Date.now(), deploymentLookup = getStagingDeployment }) {
   assert.match(release ?? "", /^[a-f0-9]{40}$/, "Expected a full release SHA.");
   assert.ok(token, "GitHub Actions read token is missing.");
+  const deployment = await deploymentLookup({ account, token: cloudflareToken, release, fetcher });
   const health = await fetcher("https://agent-talk-owner-test.ralph-cfd.workers.dev/healthz", {
     redirect: "error", signal: AbortSignal.timeout(20_000),
   });
@@ -32,10 +34,15 @@ export async function verifyLiveGate({ release, token, fetcher = fetch }) {
   }
   const data = await github("/actions/workflows/owner-portal-live-e2e.yml/runs?head_sha=" + release + "&status=success&per_page=100");
   for (const run of data.workflow_runs ?? []) {
+    const startedAt = Date.parse(run.created_at);
+    const titlePattern = /^Owner live evidence ([a-f0-9]{64}) ([0-9a-f-]+) ([0-9a-f-]+)$/i;
+    const title = titlePattern.exec(run.display_title ?? "");
     if (run.head_sha !== release || run.head_branch !== "main" || run.event !== "workflow_dispatch" ||
         run.status !== "completed" || run.conclusion !== "success" ||
         run.path?.split("@")[0] !== workflow || run.head_repository?.full_name !== repo ||
-        !Number.isSafeInteger(run.id) || !Number.isSafeInteger(run.run_attempt) || run.run_attempt < 1) continue;
+        !Number.isSafeInteger(run.id) || run.run_attempt !== 1 || !Number.isFinite(startedAt) ||
+        startedAt > now || now - startedAt > 60 * 60_000 || !title || title[2] !== deployment.versionId ||
+        title[3] !== deployment.deploymentId) continue;
     const jobs = await github("/actions/runs/" + run.id + "/attempts/" + run.run_attempt + "/jobs?per_page=100");
     const verified = [...requiredJobs].every(([name, steps]) => {
       const matches = (jobs.jobs ?? []).filter(job => job.name === name);
@@ -49,6 +56,7 @@ export async function verifyLiveGate({ release, token, fetcher = fetch }) {
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  const evidence = await verifyLiveGate({ release: process.env.EXPECTED_RELEASE, token: process.env.GH_TOKEN });
+  const evidence = await verifyLiveGate({ release: process.env.EXPECTED_RELEASE, token: process.env.GH_TOKEN,
+    account: process.env.CLOUDFLARE_ACCOUNT_ID, cloudflareToken: process.env.CLOUDFLARE_API_TOKEN });
   console.log("Verified staging live-test run " + evidence.runId + " for the expected release.");
 }
