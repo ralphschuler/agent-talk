@@ -1,8 +1,9 @@
-import { SELF, env, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
+import { SELF, env, evictDurableObject, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { expect, it } from "vite-plus/test";
 import { createLocalIdentity, sealEnvelope, signInvite, signRequest } from "../src/crypto.ts";
 import type { LocalIdentity } from "../src/crypto.ts";
 import type { Invite } from "../src/protocol.ts";
+import { DAY } from "../src/validation.ts";
 
 async function signedPost(path: string, identity: LocalIdentity, action: string, payload: unknown): Promise<Response> {
   const timestamp = String(Date.now());
@@ -18,10 +19,14 @@ async function signedPost(path: string, identity: LocalIdentity, action: string,
   });
 }
 
-async function register(identity: LocalIdentity): Promise<void> {
-  const response = await signedPost("/v1/register", identity, "register", { identity: {
+function registration(identity: LocalIdentity): Promise<Response> {
+  return signedPost("/v1/register", identity, "register", { identity: {
     agentId: identity.agentId, signingPublicKey: identity.signingPublicKey, encryptionPublicKey: identity.encryptionPublicKey,
   } });
+}
+
+async function register(identity: LocalIdentity): Promise<void> {
+  const response = await registration(identity);
   expect(response.status).toBeGreaterThanOrEqual(200);
   expect(response.status).toBeLessThan(300);
 }
@@ -115,6 +120,50 @@ it("consumes an expiring invite for exactly one recipient and requires reciproca
   expect((await accept(charlie, await signInvite(alice, { ...unsigned, inviteId: "expired", expiresAt: Date.now() - 60_000 }))).status).toBe(400);
 });
 
+it("reclaims only long-idle unrelated registrations and restores an issuer from a valid private invite", async () => {
+  const [owner, peer, active, orphan, entrant, overflow] = await Promise.all(Array.from({ length: 6 }, () => createLocalIdentity()));
+  await Promise.all([owner, peer, active, orphan].map(register));
+  // Even a one-sided approval protects both existing key pins.
+  const peerInvite = await invite(peer, "directory-capacity");
+  expect((await signedPost("/v1/contact/approve", owner, "contact/approve", { invite: peerInvite })).status).toBe(200);
+  const orphanInvite = await invite(orphan, "returning-issuer");
+  const directory = env.DIRECTORY.getByName("directory");
+  try {
+    await runInDurableObject(directory, (_, state) => state.storage.transactionSync(() => {
+      const sql = state.storage.sql;
+      sql.exec("UPDATE identities SET last_active=0 WHERE agent_id IN (?,?,?,?)", owner.agentId, peer.agentId, active.agentId, orphan.agentId);
+      const count = Number(sql.exec("SELECT COUNT(*) AS n FROM identities").one().n);
+      for (let i = 0; i < 512 - count; i++) {
+        const id = "directory-fixture-" + i;
+        sql.exec("INSERT INTO identities VALUES (?, ?, ?, ?, ?)", id, "fixture", "fixture", Date.now(), i < 2 ? 0 : Date.now());
+      }
+      // Historic blocks must independently protect identities even without an approval row.
+      sql.exec("INSERT INTO blocks VALUES ('directory-fixture-0', 'directory-fixture-1', ?)", Date.now());
+    }));
+    (await socketFor(active)).close(1000, "active identity");
+    await register(entrant);
+    const registered = await runInDurableObject(directory, (_, state) =>
+      state.storage.sql.exec("SELECT agent_id, encryption_key FROM identities").toArray());
+    const pins = new Map(registered.map(row => [row.agent_id, row.encryption_key]));
+    expect(pins.has(orphan.agentId)).toBe(false);
+    for (const identity of [owner, peer, active, entrant]) expect(pins.get(identity.agentId)).toBe(identity.encryptionPublicKey);
+    for (const id of ["directory-fixture-0", "directory-fixture-1"]) expect(pins.has(id)).toBe(true);
+    expect((await registration(overflow)).status).toBe(429);
+    const accept = () => signedPost("/v1/contact/approve", owner, "contact/approve", { invite: orphanInvite });
+    expect((await accept()).status).toBe(429);
+    await runInDurableObject(directory, (_, state) => { state.storage.sql.exec("DELETE FROM identities WHERE agent_id='directory-fixture-2'"); });
+    expect((await accept()).status).toBe(200);
+    const restored = await runInDurableObject(directory, (_, state) =>
+      state.storage.sql.exec("SELECT signing_key, encryption_key FROM identities WHERE agent_id=?", orphan.agentId).one());
+    expect(restored).toEqual({ signing_key: orphan.signingPublicKey, encryption_key: orphan.encryptionPublicKey });
+  } finally {
+    await runInDurableObject(directory, (_, state) => {
+      state.storage.sql.exec("DELETE FROM blocks WHERE owner_id='directory-fixture-0'");
+      state.storage.sql.exec("DELETE FROM identities WHERE agent_id LIKE 'directory-fixture-%'");
+    });
+  }
+});
+
 it("enforces bounded offline retention and independent sender IDs in the same mailbox", async () => {
   const [alice, bob, charlie] = await Promise.all(Array.from({ length: 3 }, () => createLocalIdentity()));
   await Promise.all([register(alice), register(bob), register(charlie)]);
@@ -126,19 +175,81 @@ it("enforces bounded offline retention and independent sender IDs in the same ma
     expect((await signedPost("/v1/send", sender, "send", { envelope })).status).toBe(201);
   }
   const box = env.MAILBOX.getByName(bob.agentId);
+  // A sender's 48 occupied slots leave 16 slots available to other confirmed contacts.
+  await runInDurableObject(box, (_, state) => {
+    for (let i = 0; i < 47; i++) state.storage.sql.exec("INSERT INTO queue VALUES (?, ?, ?, ?)", alice.agentId, "sender-fixture-" + i, "{}", Date.now());
+  });
+  const waiting = await sealEnvelope(alice, bob, "individual-limit", "synthetic");
+  const senderFull = await signedPost("/v1/send", alice, "send", { envelope: waiting });
+  expect(senderFull.status).toBe(429);
+  expect(await senderFull.json()).toEqual({ error: "sender limit for this mailbox reached" });
+  const other = await sealEnvelope(charlie, bob, "other-room", "synthetic");
+  expect((await signedPost("/v1/send", charlie, "send", { envelope: other })).status).toBe(201);
+  await runInDurableObject(box, (_, state) => {
+    state.storage.sql.exec("DELETE FROM queue WHERE id LIKE 'sender-fixture-%' OR id='other-room'");
+  });
   // Seed the remaining occupancy in DO storage; assert admission through the public entry point.
   await runInDurableObject(box, (_, state) => {
     const sql = state.storage.sql;
     for (let i = 0; i < 62; i++) sql.exec("INSERT INTO queue VALUES (?, ?, ?, ?)", "fixture", "fixture-" + i, "{}", Date.now());
   });
   const last = await sealEnvelope(alice, bob, "last", "synthetic");
-  expect((await signedPost("/v1/send", alice, "send", { envelope: last })).status).toBe(429);
+  const mailboxFull = await signedPost("/v1/send", alice, "send", { envelope: last });
+  expect(mailboxFull.status).toBe(429);
+  expect(await mailboxFull.json()).toEqual({ error: "mailbox full" });
   await runInDurableObject(box, (_, state) => {
     state.storage.sql.exec("UPDATE queue SET received=0 WHERE sender='fixture'");
   });
   expect(await runDurableObjectAlarm(box)).toBe(true);
   expect(await runInDurableObject(box, (_, state) => state.storage.sql.exec("SELECT COUNT(*) AS n FROM queue").one().n)).toBe(2);
   expect((await signedPost("/v1/send", alice, "send", { envelope: last })).status).toBe(201);
+});
+
+it("replays authorized legacy mail only within its original retention window", async () => {
+  const [alice, bob, carol] = await Promise.all(Array.from({ length: 3 }, () => createLocalIdentity()));
+  await Promise.all([alice, bob, carol].map(register));
+  await mutuallyApprove(alice, bob, "legacy-block");
+  await mutuallyApprove(carol, bob, "legacy-mail");
+  expect((await signedPost("/v1/contact/block", alice, "contact/block", { peerId: bob.agentId })).status).toBe(200);
+  const now = Date.now();
+  const [blocked, valid, expired, interim, oldInterim, future] = await Promise.all([
+    sealEnvelope(alice, bob, "blocked", "synthetic", now - DAY),
+    sealEnvelope(carol, bob, "valid", "synthetic", now - 2 * DAY),
+    sealEnvelope(carol, bob, "expired", "synthetic", now - 8 * DAY),
+    sealEnvelope(carol, bob, "interim", "synthetic", now - 3 * DAY),
+    sealEnvelope(carol, bob, "old-interim", "synthetic", now - 9 * DAY),
+    sealEnvelope(carol, bob, "future", "synthetic", now + 2 * DAY),
+  ]);
+  const box = env.MAILBOX.getByName(bob.agentId);
+  await runInDurableObject(box, (_, state) => state.storage.transactionSync(() => {
+    const sql = state.storage.sql;
+    sql.exec("DELETE FROM mailbox_migrations");
+    // Original blocking purged the blocker's own mailbox only. Bob has no local bar for Alice.
+    sql.exec("DELETE FROM barred WHERE sender=?", alice.agentId);
+    sql.exec("CREATE TABLE messages (id TEXT PRIMARY KEY, sender_id TEXT NOT NULL, envelope TEXT NOT NULL, created_at INTEGER NOT NULL)");
+    for (const envelope of [blocked, valid, expired, future]) {
+      sql.exec("INSERT INTO messages VALUES (?,?,?,?)", envelope.id, envelope.senderId, JSON.stringify(envelope), envelope.createdAt);
+    }
+    for (const envelope of [interim, oldInterim]) {
+      // The first migrator used the upgrade time as the receipt time for these rows.
+      sql.exec("INSERT INTO queue VALUES (?,?,?,?)", envelope.senderId, envelope.id, JSON.stringify(envelope), now);
+    }
+  }));
+  await evictDurableObject(box);
+  const socket = await socketFor(bob);
+  const replay = nextMessage(socket);
+  socket.send(JSON.stringify({ type: "resume" }));
+  expect((await replay).envelope.id).toBe(interim.id);
+  socket.close(1000);
+  const remaining = await runInDurableObject(box, (_, state) => ({
+    rows: state.storage.sql.exec("SELECT id, received FROM queue ORDER BY received").toArray(),
+    originalTable: state.storage.sql.exec("SELECT 1 FROM sqlite_master WHERE name='messages'").toArray(),
+    migrated: state.storage.sql.exec("SELECT version FROM mailbox_migrations").one().version,
+  }));
+  expect(remaining).toEqual({
+    rows: [{ id: interim.id, received: interim.createdAt }, { id: valid.id, received: valid.createdAt }],
+    originalTable: [], migrated: 1,
+  });
 });
 
 it("pushes live and safely replays after local persistence but before ACK", async () => {

@@ -12,9 +12,13 @@ Set these **GitHub Environment secrets** in both environments; do not commit the
 - `CLOUDFLARE_API_TOKEN`
 - `CLOUDFLARE_ACCOUNT_ID`
 
-Use a token scoped to the target account with authority to create or update these Workers and their SQLite namespaces. The production check reads the active zone, its exact DNS name and its Workers domain assignments. Grant Zone Read, DNS Read and the required Workers domain management permission for this zone. The domain attachment explicitly disables replacing an origin, overriding DNS records and replacing the domain set.
+Use a token scoped to the target account with permission to read and update the existing Workers and inspect their SQLite namespaces. Production additionally reads the active zone and the existing Workers custom domain assignment.
 
-Both deployments are manual. Test requires a successful Verify run on the same commit and runs the synthetic MCP smoke against its Workers URL. Production requires a successful test deployment and smoke on the same commit as well as its `DEPLOY_PRODUCTION` confirmation. It checks domain ownership before upload, checks again when binding the hostname, verifies distinct SQLite namespaces, and exercises the production hostname through MCP.
+Both deployments are manual. Test requires a successful Verify run on the same commit. Production requires a successful test deployment on that commit and the `DEPLOY_PRODUCTION` confirmation.
+
+Each preflight requires the existing Worker and its exact `PROJECT_OWNER` marker. Production also requires the existing binding for `agent-talk.nyphon.de` on the active `nyphon.de` zone in the selected account. The workflow uploads a version and activates that exact version at 100% on the owned Worker. It checks the target again before and after activation. These updates leave DNS records, trigger configuration and custom domain bindings untouched.
+
+Each environment verifies its SQLite namespaces and runs the synthetic MCP exchange against its live URL. The smoke compares the full Git commit in `/healthz` with the workflow commit and checks the live landing page bytes against the built static asset. CI logs record the commit, Cloudflare version ID and HTML SHA-256.
 
 On 26 November 2026 the owner approved using the existing Workers Paid subscription after the dashboard plan check. These workflows never change subscriptions.
 

@@ -9,6 +9,7 @@ import {
   envelopeAad,
   fromBase64url,
   inviteMessage,
+  MAX_TEXT_LENGTH,
   type AgentIdentity,
   type CipherEnvelope,
   type Invite,
@@ -64,6 +65,9 @@ export async function sealEnvelope(
   plaintext: string,
   createdAt = Date.now(),
 ): Promise<CipherEnvelope> {
+  if (!plaintext.isWellFormed() || plaintext.length === 0 || plaintext.length > MAX_TEXT_LENGTH) {
+    throw new Error("Expected 1–12000 characters of Unicode text.");
+  }
   const header = { version: 1 as const, id, senderId: identity.agentId, recipientId: recipient.agentId, createdAt };
   const senderKey = {
     privateKey: await suite.kem.deserializePrivateKey(fromBase64url(identity.encryptionSecretKey)),
@@ -81,5 +85,7 @@ export async function openEnvelope(identity: LocalIdentity, sender: AgentIdentit
   const senderPublicKey = await suite.kem.deserializePublicKey(fromBase64url(sender.encryptionPublicKey));
   const context = await suite.createRecipientContext({ recipientKey, senderPublicKey, enc: fromBase64url(envelope.enc) });
   const plaintext = await context.open(fromBase64url(envelope.ciphertext), envelopeAad(envelope));
-  return new TextDecoder().decode(plaintext);
+  const text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(plaintext);
+  if (text.length === 0 || text.length > MAX_TEXT_LENGTH) throw new Error("Invalid message length.");
+  return text;
 }

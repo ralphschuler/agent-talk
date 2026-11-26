@@ -2,6 +2,15 @@ import { expect, it } from "vite-plus/test";
 import { createLocalIdentity, openEnvelope, sealEnvelope, signInvite, verifyInvite } from "../src/crypto.ts";
 import type { Invite } from "../src/protocol.ts";
 
+it("preserves complete Unicode text at the supported message boundary", async () => {
+  const alice = await createLocalIdentity();
+  const bob = await createLocalIdentity();
+  const text = "\uFEFF" + "🍐".repeat(5999) + "\n";
+  const envelope = await sealEnvelope(alice, bob, "unicode-limit", text);
+  await expect(openEnvelope(bob, alice, envelope)).resolves.toBe(text);
+  await expect(sealEnvelope(alice, bob, "too-long", text + ".")).rejects.toThrow("Unicode text");
+});
+
 it("uses authenticated HPKE with the pinned sender key", async () => {
   const alice = await createLocalIdentity();
   const bob = await createLocalIdentity();

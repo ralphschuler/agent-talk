@@ -1,4 +1,5 @@
 export const PROTOCOL_VERSION = 1;
+export const MAX_TEXT_LENGTH = 12_000;
 
 export type AgentIdentity = {
   agentId: string;

@@ -5,6 +5,7 @@ node_modules/
 worker-startup.cpuprofile
 .agent-talk/
 agent-talk-state.json
+agent-talk-state.json.lock*
 agent-talk-state.json.*.tmp
 .env
 .env.*

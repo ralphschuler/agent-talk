@@ -1,5 +1,6 @@
 // Runs in the selected GitHub Environment; credentials stay on its runner.
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 const [command, mode] = process.argv.slice(2);
 assert.ok(["test","production"].includes(mode));
 const account = process.env.CLOUDFLARE_ACCOUNT_ID;
@@ -11,14 +12,13 @@ const worker = accountPath + "/workers/scripts/" + script;
 const hostname = "agent-talk.nyphon.de";
 const project = "ralphschuler/agent-talk:" + mode;
 
-async function api(label, path, {method="GET", body, absent=false}={}) {
+async function api(label, path, {method="GET", body}={}) {
   const response = await fetch("https://api.cloudflare.com/client/v4" + path, {
     method, redirect: "error", signal: AbortSignal.timeout(20000),
     headers: {authorization: "Bearer " + token, "content-type": "application/json"},
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   const json = await response.json();
-  if (absent && response.status === 404 && json.errors?.some(e=>[10007,10090].includes(e.code))) return null;
   assert.ok(response.ok && json.success, label + " HTTP " + response.status + " Cloudflare codes " + (json.errors ?? []).map(e=>e.code).join(","));
   return json;
 }
@@ -27,42 +27,58 @@ async function checkDomain() {
   const zones = (await api("Zone lookup", "/zones?name=nyphon.de&account.id=" + account)).result;
   assert.equal(zones.length, 1, "Unique target zone required");
   const zone = zones[0];
-  assert.ok(zone.account?.id === account && zone.name === "nyphon.de" && zone.status === "active", "Target zone must be active in this account");
+  assert.ok(/^[0-9a-f]{32}$/i.test(zone.id) && zone.account?.id === account && zone.name === "nyphon.de" && zone.status === "active", "Target zone must be active in this account");
   const domains = (await api("Workers hostname lookup", accountPath + "/workers/domains?hostname=" + hostname)).result;
-  const records = (await api("Exact DNS lookup", "/zones/" + zone.id + "/dns_records?name=" + hostname)).result;
-  const owned = domains.length === 1 && domains[0].service === script && domains[0].hostname === hostname && domains[0].zone_id === zone.id;
-  assert.ok(owned || (domains.length === 0 && records.length === 0), "Hostname or DNS record already in use");
-  return {zone, owned};
+  assert.equal(domains.length, 1, "The existing production hostname binding is required");
+  const domain = domains[0];
+  assert.ok(domain.service === script && domain.hostname === hostname && domain.zone_id === zone.id &&
+    domain.environment === "production" && domain.enabled !== false && (domain.zone_name === undefined || domain.zone_name === zone.name), "Production hostname belongs to a different Worker, zone or environment, or is disabled");
+  console.log("Verified existing hostname " + hostname + " on " + script);
 }
 
+async function checkOwner() {
+  const configured = (await api("Existing Worker settings", worker + "/settings")).result;
+  assert.ok(configured.bindings?.some(b => b.name === "PROJECT_OWNER" && b.type === "plain_text" && b.text === project),
+    "Required project ownership marker missing from " + script);
+  if (mode === "production") await checkDomain();
+}
+
+if (command === "preflight") {
+  const release = process.env.EXPECTED_RELEASE;
+  assert.match(release ?? "", /^[a-f0-9]{40}$/, "Expected a complete Git commit SHA");
+  const built = JSON.parse(await readFile(new URL("../.cloudflare/output/v1/workers/default/worker.config.json", import.meta.url), "utf8"));
+  assert.ok(built.name === script && built.env?.PROJECT_OWNER?.value === project && built.env?.RELEASE_SHA?.value === release,
+    "Prebuilt Worker targets a different environment or commit");
+  for (const [binding, kind] of [["DIRECTORY", "Directory"], ["MAILBOX", "Mailbox"]]) {
+    assert.ok(built.env[binding]?.worker === script && built.env[binding]?.exportName === kind, "Prebuilt storage binding targets a different Worker");
+  }
+}
 if (command === "preflight" || command === "inspect") {
   const settings = (await api("Workers account settings", accountPath + "/workers/account-settings")).result;
   console.log("Workers account accessible. Default usage model:", settings.default_usage_model ?? "unspecified");
-  // The owner approved this account's existing Workers Paid subscription.
-  const scripts = (await api("Worker name check", accountPath + "/workers/scripts")).result;
-  assert.ok(Array.isArray(scripts));
-  const current = scripts.find(s => s.id === script);
-  if (current) {
-    const configured = (await api("Worker identity", worker + "/settings")).result;
-    if (!configured.bindings?.some(b => b.name === "PROJECT_OWNER" && b.text === project)) {
-      assert.equal(mode, "test", "Existing Worker ownership unverified");
-      const deployments = (await api("Pilot ownership", worker + "/deployments")).result;
-      const latest = (deployments.deployments ?? deployments).toSorted((a,b)=>Date.parse(b.created_on)-Date.parse(a.created_on))[0];
-      assert.ok(latest?.versions?.length === 1 && latest.versions[0].version_id === "ff408d02-e2c3-4cb3-9ec0-937dcf715bd8", "Unexpected pilot version");
-    }
-  }
-  console.log("Worker name:", script, current ? "(same project)" : "(available)");
-  if (mode === "production") await checkDomain();
-} else if (command === "bind" && mode === "production") {
-  const {zone, owned} = await checkDomain();
-  if (!owned) {
-    await api("Guarded hostname attachment", worker + "/domains/records", {method:"PUT", body:{
-      override_scope:false, override_existing_origin:false, override_existing_dns_record:false,
-      origins:[{hostname, zone_id:zone.id}],
-    }});
-  }
-  assert.ok((await checkDomain()).owned, "Hostname binding not confirmed");
-  console.log("Custom domain attached to", script);
+  await checkOwner();
+  console.log("Verified existing project Worker " + script);
+} else if (command === "promote") {
+  // Consume the pinned CLI's structured JSONL receipt, never a version selected by recency.
+  const release = process.env.EXPECTED_RELEASE;
+  assert.match(release ?? "", /^[a-f0-9]{40}$/, "Expected a complete Git commit SHA");
+  const receipt = await readFile(process.env.WRANGLER_OUTPUT_FILE_PATH, "utf8");
+  const uploads = receipt.trim().split("\n").map(line => JSON.parse(line)).filter(row => row.type === "version-upload");
+  assert.equal(uploads.length, 1, "Expected exactly one version upload receipt");
+  const { worker_name: target, version_id: versionId } = uploads[0];
+  assert.equal(target, script, "Version receipt targets another Worker");
+  assert.match(versionId, /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/i, "Invalid version ID");
+  await checkOwner();
+  const version = (await api("Uploaded version", worker + "/versions/" + versionId)).result;
+  assert.ok(version.id === versionId && version.annotations?.["workers/message"] === release, "Uploaded version does not match the Git commit");
+  const versions = [{ version_id: versionId, percentage: 100 }];
+  const deployment = (await api("Activate Worker version", worker + "/deployments", {
+    method: "POST", body: { strategy: "percentage", versions },
+  })).result;
+  assert.deepEqual(deployment.versions.map(v => ({ version_id: v.version_id, percentage: v.percentage })), versions);
+  console.log("Activated " + script + " version " + versionId + " for Git commit " + release);
+} else if (command === "verify-owner") {
+  await checkOwner();
 } else if (command === "storage") {
   const ids = new Set();
   let page = 1;

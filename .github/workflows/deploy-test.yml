@@ -16,10 +16,11 @@ jobs:
     env:
       CF_SEND_TELEMETRY: "false"
       DO_NOT_TRACK: "1"
+      EXPECTED_RELEASE: ${{ github.sha }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with: {persist-credentials: false}
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with: {node-version: 24, cache: npm}
       - name: Verify required check for this commit
         env:
@@ -32,7 +33,20 @@ jobs:
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-      - run: npx cf deploy --prebuilt --mode test
+      - name: Upload version to the existing Worker
+        run: npx cf workers versions create --prebuilt --mode test --message "$EXPECTED_RELEASE"
+        env:
+          WRANGLER_OUTPUT_FILE_PATH: ${{ runner.temp }}/agent-talk-version.jsonl
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      - name: Activate the uploaded version
+        run: node scripts/cloudflare-rollout.mjs promote test
+        env:
+          WRANGLER_OUTPUT_FILE_PATH: ${{ runner.temp }}/agent-talk-version.jsonl
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      - name: Verify existing release target
+        run: node scripts/cloudflare-rollout.mjs verify-owner test
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}

@@ -1,11 +1,17 @@
 import { DurableObject } from "cloudflare:workers";
-import { authMessage, fromBase64url, inviteMessage, type CipherEnvelope } from "./protocol.ts";
+import { authMessage, fromBase64url, inviteMessage, type AgentIdentity, type CipherEnvelope } from "./protocol.ts";
 import { agentId, asEnvelope, asIdentity, asInvite, canonicalBytes, CLOCK_SKEW, DAY, fields, identifier, readJson, record } from "./validation.ts";
 
 export interface Env {
+  RELEASE_SHA: string;
   DIRECTORY: DurableObjectNamespace<Directory>;
   MAILBOX: DurableObjectNamespace<Mailbox>;
 }
+
+const IDENTITY_LIMIT = 512;
+const ORPHAN_RETENTION = 30 * DAY;
+const MAILBOX_LIMIT = 64;
+const SENDER_QUEUE_LIMIT = 48;
 
 function json(data: unknown, status = 200): Response {
   return Response.json(data, { status, headers: { "cache-control": "no-store", "x-content-type-options": "nosniff" } });
@@ -33,7 +39,7 @@ async function signed(publicKey: string, signature: string, message: Uint8Array)
 export default {
   async fetch(request, env): Promise<Response> {
     const url = new URL(request.url);
-    if (url.pathname === "/healthz" && request.method === "GET") return json({ ok: true, protocol: 1 });
+    if (url.pathname === "/healthz" && request.method === "GET") return json({ ok: true, protocol: 1, release: env.RELEASE_SHA });
     const action = url.pathname.slice("/v1/".length);
     if (!url.pathname.startsWith("/v1/") || !["register", "socket", "contact/approve", "contact/block", "send"].includes(action)) return fail("not found", 404);
     const socket = action === "socket";
@@ -83,13 +89,23 @@ export class Directory extends DurableObject<Env> {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.sql.exec(`
-      CREATE TABLE IF NOT EXISTS identities (agent_id TEXT PRIMARY KEY, signing_key TEXT NOT NULL, encryption_key TEXT NOT NULL, registered_at INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS identities (agent_id TEXT PRIMARY KEY, signing_key TEXT NOT NULL, encryption_key TEXT NOT NULL, registered_at INTEGER NOT NULL, last_active INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS approvals (owner_id TEXT NOT NULL, peer_id TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY(owner_id, peer_id));
       CREATE TABLE IF NOT EXISTS blocks (owner_id TEXT NOT NULL, peer_id TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY(owner_id, peer_id));
       CREATE TABLE IF NOT EXISTS consumed_invites (issuer_id TEXT NOT NULL, invite_id TEXT NOT NULL, consumed_by TEXT NOT NULL, PRIMARY KEY(issuer_id, invite_id));
       CREATE TABLE IF NOT EXISTS admissions (signature TEXT PRIMARY KEY, expires INTEGER NOT NULL);
       CREATE INDEX IF NOT EXISTS admissions_expiry ON admissions(expires);
+      CREATE INDEX IF NOT EXISTS approvals_peer ON approvals(peer_id);
+      CREATE INDEX IF NOT EXISTS blocks_peer ON blocks(peer_id);
     `);
+    if (!this.sql.exec("PRAGMA table_info(identities)").toArray().some(row => row.name === "last_active")) {
+      this.ctx.storage.transactionSync(() => {
+        this.sql.exec("ALTER TABLE identities ADD COLUMN last_active INTEGER NOT NULL DEFAULT 0");
+        // Older versions did not track activity; give every existing identity a full grace period.
+        this.sql.exec("UPDATE identities SET last_active = ?", Date.now());
+      });
+    }
+    this.sql.exec("CREATE INDEX IF NOT EXISTS identities_activity ON identities(last_active)");
     if (!this.sql.exec("PRAGMA table_info(consumed_invites)").toArray().some(row => row.name === "expires")) {
       this.sql.exec("ALTER TABLE consumed_invites ADD COLUMN expires INTEGER");
       this.sql.exec("UPDATE consumed_invites SET expires = ?", Date.now() + DAY + CLOCK_SKEW);
@@ -102,6 +118,30 @@ export class Directory extends DurableObject<Env> {
       actor, peer, peer, actor).toArray().length > 0;
   }
 
+  private touch(actor: string, lastActive: number, now: number) {
+    // Coalesce writes on active identities. Reclamation allows for this full extra day.
+    if (now - lastActive >= DAY) this.sql.exec("UPDATE identities SET last_active = ? WHERE agent_id = ?", now, actor);
+  }
+
+  private hasRegistrationSlot(now: number): boolean {
+    const count = Number(this.sql.exec("SELECT COUNT(*) AS n FROM identities").one().n);
+    if (count < IDENTITY_LIMIT) return true;
+    const needed = count - IDENTITY_LIMIT + 1;
+    this.sql.exec(`DELETE FROM identities WHERE agent_id IN (
+      SELECT i.agent_id FROM identities i WHERE i.last_active < ?
+      AND NOT EXISTS (SELECT 1 FROM approvals WHERE owner_id = i.agent_id)
+      AND NOT EXISTS (SELECT 1 FROM approvals WHERE peer_id = i.agent_id)
+      AND NOT EXISTS (SELECT 1 FROM blocks WHERE owner_id = i.agent_id)
+      AND NOT EXISTS (SELECT 1 FROM blocks WHERE peer_id = i.agent_id)
+      ORDER BY i.last_active LIMIT ?
+    )`, now - ORPHAN_RETENTION - DAY, Math.min(needed, 32));
+    return Number(this.sql.exec("SELECT COUNT(*) AS n FROM identities").one().n) < IDENTITY_LIMIT;
+  }
+
+  private insertIdentity(identity: AgentIdentity, now: number) {
+    this.sql.exec("INSERT INTO identities (agent_id, signing_key, encryption_key, registered_at, last_active) VALUES (?, ?, ?, ?, ?)", identity.agentId, identity.signingPublicKey, identity.encryptionPublicKey, now, now);
+  }
+
   async fetch(request: Request): Promise<Response> {
     const path = new URL(request.url).pathname;
     const body = await readJson(request);
@@ -109,22 +149,37 @@ export class Directory extends DurableObject<Env> {
     if (path === "/register") {
       const identity = asIdentity(body.identity);
       if (!identity) return fail("invalid identity");
-      const [existing] = this.sql.exec("SELECT encryption_key FROM identities WHERE agent_id = ?", identity.agentId);
-      if (existing) return existing.encryption_key === identity.encryptionPublicKey ? json({ ok: true, agentId: identity.agentId }) : fail("key mismatch", 409);
-      if (Number(this.sql.exec("SELECT COUNT(*) AS n FROM identities").one().n) >= 512) return fail("pilot capacity reached", 429);
-      this.sql.exec("INSERT INTO identities VALUES (?, ?, ?, ?)", identity.agentId, identity.signingPublicKey, identity.encryptionPublicKey, Date.now());
+      const now = Date.now();
+      const [existing] = this.sql.exec("SELECT encryption_key, last_active FROM identities WHERE agent_id = ?", identity.agentId);
+      if (existing) {
+        if (existing.encryption_key !== identity.encryptionPublicKey) return fail("key mismatch", 409);
+        this.touch(identity.agentId, Number(existing.last_active), now);
+        return json({ ok: true, agentId: identity.agentId });
+      }
+      if (!this.hasRegistrationSlot(now)) return fail("pilot identity capacity reached", 429);
+      this.insertIdentity(identity, now);
       return json({ ok: true, agentId: identity.agentId }, 201);
     }
     const actor = body.actor;
     if (!agentId(actor)) return fail("invalid actor");
+    if (path === "/migration-contacts") {
+      // Internal, one-time mailbox migration. The public router exposes no contact-list endpoint.
+      const allowed = this.sql.exec(`SELECT a.peer_id FROM approvals a JOIN approvals b
+        ON a.peer_id = b.owner_id AND b.peer_id = a.owner_id WHERE a.owner_id = ?
+        AND NOT EXISTS (SELECT 1 FROM blocks WHERE owner_id = a.owner_id AND peer_id = a.peer_id)
+        AND NOT EXISTS (SELECT 1 FROM blocks WHERE owner_id = a.peer_id AND peer_id = a.owner_id)`, actor);
+      return json(allowed.toArray().map(row => row.peer_id));
+    }
     if (path === "/admit") {
       const now = Date.now();
-      if (!this.sql.exec("SELECT 1 FROM identities WHERE agent_id = ?", actor).toArray().length) return fail("authentication failed", 401);
+      const [identity] = this.sql.exec("SELECT last_active FROM identities WHERE agent_id = ?", actor);
+      if (!identity) return fail("authentication failed", 401);
       this.sql.exec("DELETE FROM admissions WHERE expires < ?", now);
       if (typeof body.signature !== "string" || typeof body.expires !== "number" || body.expires < now) return fail("expired", 401);
       if (this.sql.exec("SELECT 1 FROM admissions WHERE signature = ?", body.signature).toArray().length) return fail("request already used", 409);
       if (Number(this.sql.exec("SELECT COUNT(*) AS n FROM admissions").one().n) >= 8192) return fail("pilot request limit", 429);
       this.sql.exec("INSERT INTO admissions VALUES (?, ?)", body.signature, body.expires);
+      this.touch(actor, Number(identity.last_active), now);
       return json({ ok: true });
     }
     if (path === "/approve") {
@@ -134,7 +189,7 @@ export class Directory extends DurableObject<Env> {
       if (!await signed(invite.issuer.signingPublicKey, signature, inviteMessage(unsigned))) return fail("invalid signature", 403);
       const peer = invite.issuer.agentId;
       const [identity] = this.sql.exec("SELECT encryption_key FROM identities WHERE agent_id = ?", peer);
-      if (!identity || identity.encryption_key !== invite.issuer.encryptionPublicKey || this.blocked(actor, peer)) return fail("contact unavailable", 403);
+      if ((identity && identity.encryption_key !== invite.issuer.encryptionPublicKey) || this.blocked(actor, peer)) return fail("contact unavailable", 403);
       const now = Date.now();
       if (invite.expiresAt <= now) return fail("expired invite");
       this.sql.exec("DELETE FROM consumed_invites WHERE expires < ?", now);
@@ -143,9 +198,15 @@ export class Directory extends DurableObject<Env> {
       if (used && used.consumed_by !== actor) return fail("invite already used", 409);
       if (!used) {
         if (Number(this.sql.exec("SELECT COUNT(*) AS n FROM consumed_invites").one().n) >= 8192) return fail("invite limit", 429);
-        this.ctx.storage.transactionSync(() => {
+        return this.ctx.storage.transactionSync(() => {
+          // A valid signed invitation also proves ownership after an idle, unrelated registration aged out.
+          if (!identity) {
+            if (!this.hasRegistrationSlot(now)) return fail("pilot identity capacity reached", 429);
+            this.insertIdentity(invite.issuer, now);
+          }
           this.sql.exec("INSERT INTO consumed_invites VALUES (?, ?, ?, ?)", peer, invite.inviteId, actor, invite.expiresAt);
           this.sql.exec("INSERT OR IGNORE INTO approvals VALUES (?, ?, ?)", actor, peer, now);
+          return json({ ok: true });
         });
       }
       return json({ ok: true });
@@ -175,14 +236,60 @@ export class Mailbox extends DurableObject<Env> {
       sender TEXT NOT NULL, id TEXT NOT NULL, envelope TEXT NOT NULL, received INTEGER NOT NULL,
       PRIMARY KEY(sender, id));
       CREATE INDEX IF NOT EXISTS queue_received ON queue(received);
-      CREATE TABLE IF NOT EXISTS barred (sender TEXT PRIMARY KEY);`);
-    if (this.sql.exec("SELECT 1 FROM sqlite_master WHERE type='table' AND name='messages'").toArray().length) {
-      this.ctx.storage.transactionSync(() => {
-        this.sql.exec("INSERT OR IGNORE INTO queue SELECT sender_id,id,envelope,? FROM messages", Date.now());
-        this.sql.exec("DROP TABLE messages");
-      });
-      this.ctx.waitUntil(this.scheduleExpiry());
+      CREATE TABLE IF NOT EXISTS barred (sender TEXT PRIMARY KEY);
+      CREATE TABLE IF NOT EXISTS mailbox_migrations (version INTEGER PRIMARY KEY);`);
+    if (!this.sql.exec("SELECT 1 FROM mailbox_migrations WHERE version=1").toArray().length) {
+      void ctx.blockConcurrencyWhile(() => this.migrateLegacyQueue());
     }
+  }
+
+  private async migrateLegacyQueue() {
+    const legacy = this.sql.exec("SELECT 1 FROM sqlite_master WHERE type='table' AND name='messages'").toArray().length > 0;
+    const tables = legacy ? ["queue", "messages"] : ["queue"];
+    let owner = this.ctx.id.name;
+    if (!agentId(owner)) {
+      // Some wake-ups provide only the opaque DO ID. Check the full routing identity against it.
+      for (const table of tables) {
+        for (const row of this.sql.exec(`SELECT json_extract(envelope, '$.recipientId') AS recipient FROM ${table} WHERE json_valid(envelope)`)) {
+          if (agentId(row.recipient) && this.env.MAILBOX.idFromName(row.recipient).equals(this.ctx.id)) {
+            owner = row.recipient;
+            break;
+          }
+        }
+        if (agentId(owner)) break;
+      }
+    }
+    const pending = tables.some(table => this.sql.exec(`SELECT 1 FROM ${table} LIMIT 1`).toArray().length);
+    let allowed: string[] = [];
+    if (pending && agentId(owner)) {
+      const response = await post(this.env.DIRECTORY.getByName("directory"), "/migration-contacts", { actor: owner });
+      if (!response.ok) throw new Error("Cannot verify legacy contact permissions");
+      const contacts: unknown = await response.json();
+      if (!Array.isArray(contacts) || !contacts.every(agentId)) throw new Error("Invalid legacy contact permissions");
+      allowed = contacts;
+    }
+    this.ctx.storage.transactionSync(() => {
+      if (legacy) {
+        this.sql.exec("INSERT OR IGNORE INTO queue SELECT sender_id,id,envelope,created_at FROM messages");
+        this.sql.exec("DROP TABLE messages");
+      }
+      if (pending) {
+        const now = Date.now();
+        this.sql.exec("DELETE FROM queue WHERE NOT json_valid(envelope)");
+        this.sql.exec(`DELETE FROM queue WHERE sender NOT IN (SELECT value FROM json_each(?))
+          OR sender IN (SELECT sender FROM barred)
+          OR json_extract(envelope,'$.recipientId') IS NOT ?
+          OR json_extract(envelope,'$.senderId') IS NOT sender OR json_extract(envelope,'$.id') IS NOT id
+          OR json_type(envelope,'$.createdAt') IS NOT 'integer' OR json_extract(envelope,'$.createdAt') > ?
+          OR received > ?`, JSON.stringify(allowed), owner ?? "", now + CLOCK_SKEW, now + CLOCK_SKEW);
+        // The interim schema could have assigned an old envelope the date of its migration.
+        // Bound its age with both available timestamps. Future clock skew never extends retention.
+        this.sql.exec("UPDATE queue SET received=MIN(received,json_extract(envelope,'$.createdAt'),?)", now);
+        this.prune();
+      }
+    });
+    if (pending) await this.scheduleExpiry();
+    this.sql.exec("INSERT INTO mailbox_migrations VALUES (1)");
   }
 
   private prune() {
@@ -222,14 +329,15 @@ export class Mailbox extends DurableObject<Env> {
     this.prune();
     const [existing] = this.sql.exec("SELECT 1 FROM queue WHERE id=? AND sender=?", envelope.id, envelope.senderId);
     if (existing) return json({ ok: true, duplicate: true });
-    const count = Number(this.sql.exec("SELECT COUNT(*) AS n FROM queue").one().n);
-    if (count >= 64) return fail("mailbox full", 429);
+    const occupancy = this.sql.exec("SELECT COUNT(*) AS total, COUNT(CASE WHEN sender = ? THEN 1 END) AS from_sender FROM queue", envelope.senderId).one();
+    if (Number(occupancy.total) >= MAILBOX_LIMIT) return fail("mailbox full", 429);
+    if (Number(occupancy.from_sender) >= SENDER_QUEUE_LIMIT) return fail("sender limit for this mailbox reached", 429);
     this.sql.exec("INSERT INTO queue VALUES (?, ?, ?, ?)", envelope.senderId, envelope.id, JSON.stringify(envelope), Date.now());
     const message = JSON.stringify({ type: "message", envelope });
     for (const socket of this.ctx.getWebSockets()) {
       try { socket.send(message); } catch { /* committed for replay */ }
     }
-    if (count === 0) await this.scheduleExpiry();
+    if (Number(occupancy.total) === 0) await this.scheduleExpiry();
     return json({ ok: true, duplicate: false }, 201);
   }
 

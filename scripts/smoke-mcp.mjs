@@ -2,6 +2,7 @@
 // Each run creates independent identities. Only the private temporary directory
 // created by this invocation is removed. No real keys, contacts or invites.
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -47,9 +48,10 @@ async function start(name, options = {}) {
     async close() { await client.close(); running.delete(agent); }
   };
   running.add(agent);
-  client.setRequestHandler(ElicitRequestSchema, async () => agent.approve
-    ? { action: "accept", content: { approve: true } }
-    : { action: "decline" });
+  client.setRequestHandler(ElicitRequestSchema, async ({ params }) => {
+    agent.lastPrompt = params.requestedSchema?.properties?.approve;
+    return agent.approve ? { action: "accept", content: { approve: true } } : { action: "decline" };
+  });
   await client.connect(transport, { timeout: 20000 });
   if (!options.interrupt) {
     await until("signed socket upgrade", async () => (await agent.call("adapter_status")).socket === "connected");
@@ -57,12 +59,18 @@ async function start(name, options = {}) {
   return agent;
 }
 
-async function requestApproval(agent, invite) {
+async function requestApproval(agent, invite, issuer) {
   const args = { invite: JSON.stringify(invite) };
   const preview = await agent.call("contact_preview", args);
   assert.equal(preview.agentId, invite.issuer.agentId);
-  assert.match(preview.fingerprint, /^[0-9a-f]{64}$/);
+  const ownStatus = await issuer.call("adapter_status");
+  assert.equal(ownStatus.agentId, preview.agentId);
+  assert.equal(preview.fingerprint, ownStatus.fingerprint);
   await assert.rejects(() => agent.call("contact_confirm", args), /Owner approval required/);
+  assert.equal((await agent.call("adapter_status")).contacts, 0);
+  const fingerprint = createHash("sha256").update(JSON.stringify([invite.issuer.signingPublicKey, invite.issuer.encryptionPublicKey])).digest("hex");
+  assert.equal(agent.lastPrompt?.default, false);
+  for (const detail of [invite.issuer.agentId, invite.relay, fingerprint]) assert.ok(agent.lastPrompt.title.includes(detail));
   agent.approve = true;
   try { await agent.call("contact_confirm", args); } finally { agent.approve = false; }
 }
@@ -78,22 +86,52 @@ async function marker(name, id) {
   });
 }
 
+async function verifyRelease() {
+  const expected = process.env.EXPECTED_RELEASE;
+  const request = () => ({ redirect: "error", cache: "no-store", signal: AbortSignal.timeout(15000) });
+  const hash = bytes => createHash("sha256").update(bytes).digest("hex");
+  let expectedHtml;
+  if (expected !== undefined) {
+    assert.match(expected, /^[a-f0-9]{40}$/);
+    expectedHtml = hash(await readFile(join(root, ".cloudflare/output/v1/workers/default/assets/index.html")));
+  }
+  // Edge propagation can briefly serve the previous version. Retry only these read-only checks.
+  const deadline = Date.now() + (expected ? 90_000 : 0);
+  while (true) {
+    try {
+      const [health, landing] = await Promise.all([fetch(relay + "/healthz", request()), fetch(relay, request())]);
+      assert.equal(health.status, 200);
+      const status = await health.json();
+      assert.equal(status.ok, true);
+      assert.equal(status.protocol, 1);
+      assert.equal(landing.status, 200);
+      assert.equal(landing.headers.get("content-type")?.split(";")[0], "text/html");
+      const html = Buffer.from(await landing.arrayBuffer());
+      assert.match(html.toString("utf8"), /Agent Talk/);
+      if (expected) {
+        assert.equal(status.release, expected, "Live Git SHA differs");
+        assert.equal(hash(html), expectedHtml, "Live landing page differs from built release asset");
+        console.log("Verified live Git SHA " + expected + " and landing HTML SHA-256 " + expectedHtml);
+      }
+      return;
+    } catch (error) {
+      if (Date.now() >= deadline) throw error;
+      await delay(2500);
+    }
+  }
+}
+
 try {
-  const landing = await fetch(relay, { signal: AbortSignal.timeout(15000) });
-  assert.equal(landing.status, 200);
-  assert.equal(landing.headers.get("content-type")?.split(";")[0], "text/html");
-  assert.match(await landing.text(), /Agent Talk/);
-  const health = await fetch(relay + "/healthz", { signal: AbortSignal.timeout(15000) });
-  assert.equal((await health.json()).ok, true);
+  await verifyRelease();
   assert.equal((await fetch(relay + "/v1/socket", { signal: AbortSignal.timeout(15000) })).status, 426);
   const a = await start("A");
   let b = await start("B");
   const aInvite = await a.call("profile_export_invite", { displayName: "Pilot A", expiresInMinutes: 10 });
   const bInvite = await b.call("profile_export_invite", { displayName: "Pilot B", expiresInMinutes: 10 });
-  await requestApproval(a, bInvite);
+  await requestApproval(a, bInvite, b);
   const sendQuestion = () => a.call("message_send", { recipientId: bInvite.issuer.agentId, text: question });
   await assert.rejects(sendQuestion, /403/);
-  await requestApproval(b, aInvite);
+  await requestApproval(b, aInvite, a);
   await b.close();
 
   const q = await sendQuestion();
@@ -118,6 +156,8 @@ try {
   assert.equal(live.id, answer.id);
   assert.equal(live.senderId, bInvite.issuer.agentId);
   assert.equal(live.text, reply);
+  await assert.rejects(() => b.call("contact_block", { agentId: aInvite.issuer.agentId }), /Owner approval required/);
+  assert.equal((await b.call("adapter_status")).contacts, 1);
   b.approve = true;
   await b.call("contact_block", { agentId: aInvite.issuer.agentId });
   await assert.rejects(sendQuestion, /403/);
