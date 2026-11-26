@@ -1,0 +1,12 @@
+name: Owner portal test release
+on:
+  workflow_dispatch: {}
+permissions:
+  contents: read
+  actions: read
+jobs:
+  release:
+    uses: ./.github/workflows/owner-portal-release.yml
+    with:
+      target: test
+    secrets: inherit

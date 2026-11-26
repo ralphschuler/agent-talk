@@ -30,6 +30,7 @@ jobs:
       - run: npm run build
       - run: npx cf build --mode test
       - run: npx vp build --config portal/vite.config.ts
+      - run: node scripts/test-owner-release.mjs
       - name: Verify owner portal and real local MCP clients
         run: |
           npm run dev > "$RUNNER_TEMP/agent-talk-relay.log" 2>&1 &

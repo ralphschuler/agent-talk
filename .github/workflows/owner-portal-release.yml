@@ -1,0 +1,80 @@
+name: Owner portal versioned release
+on:
+  workflow_call:
+    inputs:
+      target:
+        required: true
+        type: string
+permissions:
+  contents: read
+  actions: read
+jobs:
+  release:
+    if: github.ref == 'refs/heads/main' && (inputs.target == 'test' || inputs.target == 'production')
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.target }}
+    timeout-minutes: 15
+    concurrency:
+      group: agent-talk-owner-${{ inputs.target }}
+      cancel-in-progress: false
+    env:
+      OWNER_TARGET: ${{ inputs.target }}
+      EXPECTED_RELEASE: ${{ github.sha }}
+      OWNER_OAUTH_CLIENT_ID: ${{ secrets.OWNER_OAUTH_CLIENT_ID }}
+      OWNER_OAUTH_CLIENT_SECRET: ${{ secrets.OWNER_OAUTH_CLIENT_SECRET }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CF_SEND_TELEMETRY: "false"
+      DO_NOT_TRACK: "1"
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+          cache: npm
+      - name: Require verified commit and environment credentials
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          test -n "$OWNER_OAUTH_CLIENT_ID"
+          test -n "$OWNER_OAUTH_CLIENT_SECRET"
+          test -n "$CLOUDFLARE_ACCOUNT_ID"
+          test -n "$CLOUDFLARE_API_TOKEN"
+          gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml --commit "$EXPECTED_RELEASE" --json conclusion --jq 'any(.[]; .conclusion=="success")' | grep -qx true
+      - name: Require matching live encrypted test evidence
+        if: inputs.target == 'production'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # This gate stays closed until the live encrypted owner-portal E2E workflow exists.
+          gh run list --repo "$GITHUB_REPOSITORY" --workflow owner-portal-live-e2e.yml --commit "$EXPECTED_RELEASE" --json conclusion --jq 'any(.[]; .conclusion=="success")' | grep -qx true
+      - run: npm ci
+      - run: npx vp build --config portal/vite.config.ts
+      - name: Reserve or verify the exact Worker
+        id: reserve
+        run: node scripts/owner-portal-release.mjs reserve "$OWNER_TARGET"
+      - name: Deploy first version of newly reserved Worker
+        if: steps.reserve.outputs.initial == 'true'
+        working-directory: portal
+        run: |
+          set -o pipefail
+          node -e 'process.stdout.write(JSON.stringify({GITHUB_CLIENT_SECRET: process.env.OWNER_OAUTH_CLIENT_SECRET}))' |
+            npx cf deploy --prebuilt --message "$EXPECTED_RELEASE" --secrets-file /dev/stdin >/dev/null 2>&1
+      - name: Upload a version to the verified Worker
+        if: steps.reserve.outputs.initial == 'false'
+        working-directory: portal
+        env:
+          WRANGLER_OUTPUT_FILE_PATH: ${{ runner.temp }}/owner-portal-version.jsonl
+        run: |
+          set -o pipefail
+          node -e 'process.stdout.write(JSON.stringify({GITHUB_CLIENT_SECRET: process.env.OWNER_OAUTH_CLIENT_SECRET}))' |
+            npx cf workers versions create --prebuilt --message "$EXPECTED_RELEASE" --secrets-file /dev/stdin >/dev/null 2>&1
+      - name: Activate exactly the uploaded version
+        if: steps.reserve.outputs.initial == 'false'
+        env:
+          WRANGLER_OUTPUT_FILE_PATH: ${{ runner.temp }}/owner-portal-version.jsonl
+        run: node scripts/owner-portal-release.mjs activate "$OWNER_TARGET"
+      - name: Verify the deployed version and unauthenticated boundary
+        run: node scripts/owner-portal-release.mjs verify "$OWNER_TARGET"

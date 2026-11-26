@@ -182,6 +182,18 @@ async function browserSmoke(sessionCookie, agentId, expectEmpty = false, multiAg
     assert.equal(await evaluate('document.querySelector("#messages").textContent.includes("A second synthetic message")'), true);
     assert.equal(await evaluate('document.querySelector("#messages img") === null'), true);
     if (multiAgent) {
+      ownerApproved = true;
+      const groupBackfill = await mcp.callTool({ name: "owner_group_backfill", arguments: {
+        deviceId: request.device.agentId, groupId: multiAgent.groupId, threadId: multiAgent.groupThreadId,
+      } });
+      assert.equal(JSON.parse(groupBackfill.content[0].text).queued, 2);
+      ownerApproved = false;
+      for (let attempt = 0; attempt < 60; attempt++) {
+        await evaluate('Array.from(document.querySelectorAll("#agents button")).find(b => b.textContent === ' + JSON.stringify(agentId) + ')?.click()');
+        await new Promise(resolve => setTimeout(resolve, 100));
+        if (await evaluate('document.querySelector("#messages").textContent.includes("Synthetic private group reply")')) break;
+      }
+      assert.equal(await evaluate('document.querySelector("#messages").textContent.includes("Synthetic private group question")'), true);
       await evaluate('document.querySelector("#agent-id").value = ' + JSON.stringify(multiAgent.secondAgentId));
       await evaluate('document.querySelector("#start-pairing").click()');
       await waitFor('JSON.parse(document.querySelector("#pair-request").value).agentId === ' + JSON.stringify(multiAgent.secondAgentId));
@@ -420,23 +432,29 @@ try {
     assert.equal(ack, received.id);
     await mcp.close();
     mcp = await startMcp();
+    for (let attempt = 0; attempt < 100; attempt++) {
+      if ((await invoke(mcp, "adapter_status")).socket === "connected") break;
+      await new Promise(resolve => setTimeout(resolve, 50));
+      if (attempt === 99) throw new Error("Restarted synthetic agent did not reconnect.");
+    }
+    await new Promise(resolve => setTimeout(resolve, 200));
     portalAvailable = true;
-    await invoke(mcp, "owner_copy_retry");
+    await invoke(secondMcp, "message_send", { recipientId: agent.agentId, text: "Event-driven retry wake" });
     let copiesAfterRecovery = [];
     for (let attempt = 0; attempt < 100; attempt++) {
       copiesAfterRecovery = (await (await read(device, "12345", sessionCookie)).json()).copies;
-      if (copiesAfterRecovery.length >= 3) break;
+      if (copiesAfterRecovery.length >= 4) break;
       await new Promise(resolve => setTimeout(resolve, 50));
     }
-    assert.equal(copiesAfterRecovery.length, 3);
+    assert.equal(copiesAfterRecovery.length, 4);
     const sent = await invoke(mcp, "message_send", { recipientId: secondInvite.issuer.agentId, text: "Live synthetic send" });
     let outgoingCopies = [];
     for (let attempt = 0; attempt < 100; attempt++) {
       outgoingCopies = (await (await read(device, "12345", sessionCookie)).json()).copies;
-      if (outgoingCopies.length >= 4) break;
+      if (outgoingCopies.length >= 5) break;
       await new Promise(resolve => setTimeout(resolve, 50));
     }
-    assert.equal(outgoingCopies.length, 4);
+    assert.equal(outgoingCopies.length, 5);
     const decrypted = await Promise.all(outgoingCopies.map(copy => openOwnerCopy(device, agentIdentity, copy)));
     assert.equal(decrypted.some(copy => JSON.parse(copy).id === sent.id && JSON.parse(copy).text === "Live synthetic send"), true);
     const { groupId } = await invoke(mcp, "group_create", { name: "Synthetic private group" });
@@ -458,10 +476,10 @@ try {
     let groupCopies = [];
     for (let attempt = 0; attempt < 100; attempt++) {
       groupCopies = (await (await read(device, "12345", sessionCookie)).json()).copies;
-      if (groupCopies.length >= 6) break;
+      if (groupCopies.length >= 7) break;
       await new Promise(resolve => setTimeout(resolve, 50));
     }
-    assert.equal(groupCopies.length, 6);
+    assert.equal(groupCopies.length, 7);
     assert.equal(JSON.stringify(groupCopies).includes("Synthetic private group question"), false);
     const groupMessages = (await Promise.all(groupCopies.map(copy => openOwnerCopy(device, agentIdentity, copy))))
       .map(copy => JSON.parse(copy)).filter(copy => copy.groupId === groupId);
@@ -470,7 +488,7 @@ try {
     const groupBackfill = await invoke(mcp, "owner_group_backfill", { deviceId: device.agentId, groupId, threadId: groupAsk.threadId });
     assert.equal(groupBackfill.queued, 2);
     await new Promise(resolve => setTimeout(resolve, 200));
-    assert.equal((await (await read(device, "12345", sessionCookie)).json()).copies.length, 6);
+    assert.equal((await (await read(device, "12345", sessionCookie)).json()).copies.length, 7);
     const question = await invoke(mcp, "direct_ask", { recipientId: secondInvite.issuer.agentId, text: "A2 distinct question" });
     for (let attempt = 0; attempt < 100; attempt++) {
       if ((await invoke(secondMcp, "inbox_list")).some(item => item.id === question.id)) break;
@@ -537,7 +555,7 @@ try {
     assert.equal((await read(thirdDevice, "67890", secondSession, undefined, secondInvite.issuer.agentId)).status, 403);
     await browserSmoke(anotherSession, agent.agentId, false, {
       secondAgentId: secondInvite.issuer.agentId, threadId: question.threadId,
-      secondSession, thirdAgentId: thirdInvite.issuer.agentId,
+      secondSession, thirdAgentId: thirdInvite.issuer.agentId, groupId, groupThreadId: groupAsk.threadId,
     });
     ownerApproved = false;
     console.log("Three local MCP agents delivered isolated direct and group copies; portal outage retained the durable queue.");

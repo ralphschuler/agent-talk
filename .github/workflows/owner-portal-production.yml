@@ -1,0 +1,12 @@
+name: Owner portal production release
+on:
+  workflow_dispatch: {}
+permissions:
+  contents: read
+  actions: read
+jobs:
+  release:
+    uses: ./.github/workflows/owner-portal-release.yml
+    with:
+      target: production
+    secrets: inherit
