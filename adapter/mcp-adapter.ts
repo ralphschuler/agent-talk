@@ -88,7 +88,7 @@ type AdapterState = {
   ownerDevices?: Record<string, PairingRequest>;
   ownerCopies?: Record<string, CipherEnvelope>;
   ownerGrants?: Record<string, { portal: string; expiresAt: number }>;
-  ownerQueue?: Record<string, { deviceId: string; senderId: string; messageId: string }>;
+  ownerQueue?: Record<string, { deviceId: string; senderId: string; messageId: string; groupId?: string; recordedAt?: number }>;
 };
 
 function result(value: unknown) {
@@ -155,7 +155,21 @@ class LocalAdapter {
       contact: (id) => this.state.contacts[id],
       blocked: (id) => Object.hasOwn(this.state.blocked ?? {}, id),
       read: () => this.state.groups,
-      save: (groups) => this.save({ ...this.state, groups }),
+      save: async (groups) => {
+        const next = structuredClone(this.state);
+        let queued = false;
+        for (const group of Object.values(groups.groups)) {
+          const seen = new Set((this.state.groups?.groups[group.groupId]?.posts ?? []).map(post => post.messageRef));
+          for (const post of group.posts) {
+            if (seen.has(post.messageRef)) continue;
+            this.queueOwnerCopies(next, post.senderId, post.id, group.groupId);
+            queued = true;
+          }
+        }
+        next.groups = groups;
+        await this.save(next);
+        if (queued) void this.flushOwnerCopies().catch(() => {});
+      },
       serialize: (operation) => this.serialize(operation),
       post: async (action, payload) => (await this.registeredPost(action, payload)).json(),
     });
@@ -373,6 +387,7 @@ class LocalAdapter {
       });
       socket.on("message", (data) => {
         if (this.stopped) return;
+        void this.flushOwnerCopies().catch(() => {});
         void this.serialize(() => this.onSocketMessage(socket, data.toString())).catch(() =>
           socket.close(1011),
         );
@@ -843,11 +858,11 @@ class LocalAdapter {
     return approval;
   }
 
-  private queueOwnerCopies(state: AdapterState, senderId: string, messageId: string) {
+  private queueOwnerCopies(state: AdapterState, senderId: string, messageId: string, groupId?: string) {
     for (const [deviceId, grant] of Object.entries(state.ownerGrants ?? {})) {
       if (grant.expiresAt <= Date.now() || !state.ownerDevices?.[deviceId]) continue;
-      const key = JSON.stringify([deviceId, senderId, messageId]);
-      (state.ownerQueue ??= {})[key] = { deviceId, senderId, messageId };
+      const key = JSON.stringify(groupId ? [deviceId, groupId, senderId, messageId] : [deviceId, senderId, messageId]);
+      (state.ownerQueue ??= {})[key] = { deviceId, senderId, messageId, ...(groupId && { groupId, recordedAt: Date.now() }) };
     }
   }
 
@@ -884,6 +899,23 @@ class LocalAdapter {
     return count;
   }
 
+  async backfillOwnerGroupThread(deviceId: string, groupId: string, threadId: string) {
+    const grant = this.state.ownerGrants?.[deviceId];
+    if (!grant || grant.expiresAt <= Date.now()) throw new Error("The device has no active grant.");
+    const group = this.state.groups?.groups[groupId];
+    if (!group) throw new Error("Unknown local group.");
+    const next = structuredClone(this.state);
+    let count = 0;
+    for (const post of group.posts) {
+      if (post.threadId !== threadId) continue;
+      const key = JSON.stringify([deviceId, groupId, post.senderId, post.id]);
+      (next.ownerQueue ??= {})[key] = { deviceId, groupId, senderId: post.senderId, messageId: post.id, recordedAt: Date.now() };
+      count++;
+    }
+    await this.save(next);
+    return count;
+  }
+
   async flushOwnerCopies() {
     if (this.stopped) return;
     if (this.flushingOwnerCopies) {
@@ -903,7 +935,7 @@ class LocalAdapter {
           continue;
         }
         try {
-          await this.publishOwnerCopy(grant.portal, item.deviceId, item.senderId, item.messageId, grant.expiresAt);
+          await this.publishOwnerCopy(grant.portal, item.deviceId, item.senderId, item.messageId, grant.expiresAt, item.groupId, item.recordedAt);
           await this.serialize(async () => {
             const next = structuredClone(this.state);
             delete next.ownerQueue?.[key];
@@ -933,7 +965,7 @@ class LocalAdapter {
     }
   }
 
-  async publishOwnerCopy(portal: string, deviceId: string, senderId: string, messageId: string, grantExpiresAt?: number) {
+  async publishOwnerCopy(portal: string, deviceId: string, senderId: string, messageId: string, grantExpiresAt?: number, groupId?: string, recordedAt?: number) {
     const url = new URL(portal);
     const local = url.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
     if ((!local && url.protocol !== "https:") || url.username || url.password ||
@@ -942,12 +974,19 @@ class LocalAdapter {
       const device = this.state.ownerDevices?.[deviceId]?.device;
       const incoming = this.state.inbox.find(item => item.id === messageId && item.senderId === senderId);
       const outgoing = senderId === this.state.identity.agentId ? this.state.outbox?.[messageId] : undefined;
-      const message = incoming ?? (outgoing && {
+      const post = groupId && this.state.groups?.groups[groupId]?.posts.find(item => item.id === messageId && item.senderId === senderId);
+      const groupMessage = post && {
+        id: post.id, senderId: post.senderId, groupId, text: post.text,
+        receivedAt: recordedAt ?? Date.now(),
+        direct: { type: post.kind, threadId: post.threadId, replyTo: post.replyTo },
+      };
+      const directMessage = incoming ?? (outgoing && {
         id: outgoing.id, senderId, recipientId: outgoing.recipientId, text: outgoing.text,
         receivedAt: outgoing.createdAt, direct: outgoing.direct,
       });
+      const message = groupId ? groupMessage : directMessage;
       if (!device || !message) throw new Error("Unknown approved device or message.");
-      const id = createHash("sha256").update(JSON.stringify([senderId, messageId])).digest("hex");
+      const id = createHash("sha256").update(JSON.stringify(groupId ? [groupId, senderId, messageId] : [senderId, messageId])).digest("hex");
       const key = deviceId + ":" + id;
       let staged = this.state.ownerCopies?.[key];
       if (!staged) {
@@ -1090,15 +1129,16 @@ async function main() {
   server.registerTool(
     "owner_device_enable",
     {
-      description: "Enable automatic encrypted copies of future direct messages for a previously approved device until the chosen expiry.",
+      description: "Enable automatic encrypted copies of future direct and group messages for a previously approved device until the chosen expiry.",
       inputSchema: {
         portal: z.string().url(), deviceId: z.string().refine(agentId),
         minutes: z.number().int().min(1).max(43_200),
       },
     },
     async ({ portal, deviceId, minutes }) => {
-      await ownerApproval(`Enable automatic copies of future direct messages to ${deviceId} at ${portal} for ${minutes} minutes?`);
+      await ownerApproval(`Enable automatic copies of future direct and group messages to ${deviceId} at ${portal} for ${minutes} minutes?`);
       await adapter.serialize(() => adapter.enableOwnerDevice(deviceId, portal, Date.now() + minutes * 60_000));
+      void adapter.flushOwnerCopies().catch(() => {});
       return result({ enabled: true, deviceId, minutes });
     },
   );
@@ -1122,6 +1162,22 @@ async function main() {
     "owner_copy_retry",
     { description: "Retry queued encrypted device copies after a portal outage.", inputSchema: {} },
     async () => { void adapter.flushOwnerCopies().catch(() => {}); return result({ retryStarted: true }); },
+  );
+  server.registerTool(
+    "owner_group_backfill",
+    {
+      description: "With owner approval, queue locally held messages from one group thread for an active read-only device.",
+      inputSchema: {
+        deviceId: z.string().refine(agentId), groupId: z.string().uuid(),
+        threadId: z.string().min(1).max(256),
+      },
+    },
+    async ({ deviceId, groupId, threadId }) => {
+      await ownerApproval(`Copy locally held group thread ${threadId} from ${groupId} to device ${deviceId}?`);
+      const queued = await adapter.serialize(() => adapter.backfillOwnerGroupThread(deviceId, groupId, threadId));
+      void adapter.flushOwnerCopies().catch(() => {});
+      return result({ queued });
+    },
   );
   const inviteInputs = { invite: z.string().min(1).max(4096), profile: profileInput.optional() };
   server.registerTool(

@@ -20,12 +20,14 @@ const mock = `export default { async fetch(request) {
   const url = new URL(request.url);
   if (url.hostname === "github.com" && url.pathname === "/login/oauth/access_token") {
     const body = await request.json();
-    if (!["synthetic-code", "synthetic-code2"].includes(body.code) || !body.code_verifier) return new Response("", { status: 400 });
-    return Response.json({ access_token: body.code === "synthetic-code" ? "synthetic-token" : "synthetic-token2", scope: "" });
+    if (!["synthetic-code", "synthetic-code2", "synthetic-rename"].includes(body.code) || !body.code_verifier) return new Response("", { status: 400 });
+    return Response.json({ access_token: body.code === "synthetic-code" ? "synthetic-token" :
+      body.code === "synthetic-rename" ? "synthetic-renamed-token" : "synthetic-token2", scope: "" });
   }
   if (url.hostname === "api.github.com" && url.pathname === "/user") {
-    if (request.headers.get("Authorization") === "Bearer synthetic-token") return Response.json({ id: 12345 });
-    if (request.headers.get("Authorization") === "Bearer synthetic-token2") return Response.json({ id: 67890 });
+    if (request.headers.get("Authorization") === "Bearer synthetic-token") return Response.json({ id: 12345, login: "before-rename" });
+    if (request.headers.get("Authorization") === "Bearer synthetic-renamed-token") return Response.json({ id: 12345, login: "after-rename" });
+    if (request.headers.get("Authorization") === "Bearer synthetic-token2") return Response.json({ id: 67890, login: "second-owner" });
   }
   return new Response("", { status: 404 });
 } }`;
@@ -49,6 +51,7 @@ await writeFile(join(directory, "state.json"), JSON.stringify({
     direct: { type: "ask", threadId: "synthetic-thread", replyTo: null } }],
 }), { mode: 0o600 });
 let portalAvailable = true;
+let delayedAgentId;
 const proxy = createServer(async (req, res) => {
   if (!portalAvailable) { res.writeHead(503); res.end(); return; }
   if (req.method === "GET" && (req.url === "/" || req.url.startsWith("/assets/"))) {
@@ -64,6 +67,10 @@ const proxy = createServer(async (req, res) => {
   }
   const chunks = [];
   for await (const chunk of req) chunks.push(chunk);
+  if (req.url === "/copy/read" && delayedAgentId && JSON.parse(Buffer.concat(chunks).toString()).agentId === delayedAgentId) {
+    delayedAgentId = undefined;
+    await new Promise(resolve => setTimeout(resolve, 500));
+  }
   const headers = { ...req.headers };
   if (headers.origin) headers.origin = "https://portal.example.test";
   const target = await mf.dispatchFetch("https://portal.example.test" + req.url, {
@@ -90,7 +97,8 @@ async function startMcp() {
 }
 let chrome;
 let secondMcp;
-async function browserSmoke(sessionCookie, agentId, expectEmpty = false) {
+let thirdMcp;
+async function browserSmoke(sessionCookie, agentId, expectEmpty = false, multiAgent) {
   const chromeProfile = join(directory, "chrome-" + randomBytes(8).toString("hex"));
   chrome = spawn(process.env.AGENT_TALK_CHROME ?? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", [
     "--headless=new", "--disable-gpu", "--no-first-run", "--remote-debugging-port=0",
@@ -173,6 +181,63 @@ async function browserSmoke(sessionCookie, agentId, expectEmpty = false) {
     assert.equal(await evaluate('document.querySelectorAll("#messages article").length'), 2);
     assert.equal(await evaluate('document.querySelector("#messages").textContent.includes("A second synthetic message")'), true);
     assert.equal(await evaluate('document.querySelector("#messages img") === null'), true);
+    if (multiAgent) {
+      await evaluate('document.querySelector("#agent-id").value = ' + JSON.stringify(multiAgent.secondAgentId));
+      await evaluate('document.querySelector("#start-pairing").click()');
+      await waitFor('JSON.parse(document.querySelector("#pair-request").value).agentId === ' + JSON.stringify(multiAgent.secondAgentId));
+      const secondRequest = JSON.parse(await evaluate('document.querySelector("#pair-request").value'));
+      const secondSigned = await secondMcp.callTool({ name: "owner_device_approve", arguments: { request: secondRequest } });
+      assert.notEqual(secondSigned.isError, true);
+      await evaluate('document.querySelector("#pair-approval").value = ' + JSON.stringify(secondSigned.content[0].text));
+      await evaluate('document.querySelector("#complete-pairing").click()');
+      await waitFor('document.querySelector("#status")?.textContent === "Device paired."');
+      const secondEnable = await secondMcp.callTool({ name: "owner_device_enable", arguments: {
+        portal: localPortal, deviceId: secondRequest.device.agentId, minutes: 30,
+      } });
+      assert.notEqual(secondEnable.isError, true);
+      const secondBackfill = await secondMcp.callTool({ name: "owner_thread_backfill", arguments: {
+        deviceId: secondRequest.device.agentId, peerId: agentId, threadId: multiAgent.threadId,
+      } });
+      assert.equal(JSON.parse(secondBackfill.content[0].text).queued, 2);
+      for (let attempt = 0; attempt < 60; attempt++) {
+        await evaluate('Array.from(document.querySelectorAll("#agents button")).find(b => b.textContent === ' + JSON.stringify(multiAgent.secondAgentId) + ')?.click()');
+        await new Promise(resolve => setTimeout(resolve, 100));
+        if (await evaluate('document.querySelector("#messages").textContent.includes("A2 distinct reply")')) break;
+      }
+      assert.equal(await evaluate('document.querySelector("#messages").textContent.includes("A2 distinct question")'), true);
+      assert.equal(await evaluate('document.querySelector("#messages").textContent.includes("A second synthetic message")'), false);
+      delayedAgentId = agentId;
+      await evaluate('Array.from(document.querySelectorAll("#agents button")).find(b => b.textContent === ' + JSON.stringify(agentId) + ')?.click()');
+      await new Promise(resolve => setTimeout(resolve, 50));
+      await evaluate('Array.from(document.querySelectorAll("#agents button")).find(b => b.textContent === ' + JSON.stringify(multiAgent.secondAgentId) + ')?.click()');
+      await waitFor('document.querySelector("#messages").textContent.includes("A2 distinct reply")');
+      await new Promise(resolve => setTimeout(resolve, 600));
+      assert.equal(await evaluate('document.querySelector("#messages").textContent.includes("A second synthetic message")'), false);
+      await evaluate('Array.from(document.querySelectorAll("#agents button")).find(b => b.textContent === ' + JSON.stringify(agentId) + ')?.click()');
+      await waitFor('document.querySelector("#messages").textContent.includes("A second synthetic message")');
+      assert.equal(await evaluate('document.querySelector("#messages").textContent.includes("A2 distinct reply")'), false);
+      await evaluate('window.confirm = () => true; Array.from(document.querySelectorAll("#agents button")).find(b => b.textContent === ' + JSON.stringify(agentId) + ').nextElementSibling.click()');
+      await waitFor('document.querySelector("#status").textContent === "Browser access revoked."');
+      await evaluate('Array.from(document.querySelectorAll("#agents button")).find(b => b.textContent === ' + JSON.stringify(multiAgent.secondAgentId) + ')?.click()');
+      await waitFor('document.querySelector("#messages").textContent.includes("A2 distinct reply")');
+      ownerApproved = true;
+      const revokedCopy = await mcp.callTool({ name: "owner_device_copy", arguments: {
+        portal: localPortal, deviceId: request.device.agentId, senderId: sender.agentId, messageId: "synthetic-message",
+      } });
+      assert.equal(revokedCopy.isError, true);
+      ownerApproved = false;
+      await evaluate('document.querySelector("#logout").click()');
+      await waitFor('document.querySelector("#login") && !document.querySelector("#login").hidden');
+      const bCookie = multiAgent.secondSession.slice(multiAgent.secondSession.indexOf("=") + 1);
+      await call("Network.setCookie", { name: "__Host-at_session", value: bCookie, url: localPortal + "/", secure: true, httpOnly: true, sameSite: "Lax" });
+      await call("Page.reload");
+      await waitFor('document.querySelector("#status")?.textContent?.includes("67890")');
+      await waitFor('document.querySelector("#agents").textContent.includes(' + JSON.stringify(multiAgent.thirdAgentId) + ')');
+      assert.equal(await evaluate('document.querySelector("#agents").textContent.includes(' + JSON.stringify(agentId) + ')'), false);
+      assert.equal(await evaluate('document.querySelector("#agents").textContent.includes(' + JSON.stringify(multiAgent.secondAgentId) + ')'), false);
+      assert.equal(await evaluate('document.querySelector("#messages").textContent.includes("A2 distinct")'), false);
+      console.log("One browser isolated A's two agent histories, kept A2 after A1 revocation, and cleared A content for B.");
+    }
     console.log("Chrome paired a separate browser device and decrypted two inert thread messages.");
   } finally {
     socket.close();
@@ -213,9 +278,10 @@ try {
   const anotherLogin = await mf.dispatchFetch(origin + "/auth/login", { method: "POST", headers: { origin } });
   const anotherCookie = anotherLogin.headers.get("set-cookie").split(";")[0];
   const anotherState = new URL((await anotherLogin.json()).url).searchParams.get("state");
-  const anotherCallback = await mf.dispatchFetch(origin + "/auth/callback?code=synthetic-code&state=" + anotherState,
+  const anotherCallback = await mf.dispatchFetch(origin + "/auth/callback?code=synthetic-rename&state=" + anotherState,
     { headers: { cookie: anotherCookie }, redirect: "manual" });
   const anotherSession = anotherCallback.headers.get("set-cookie").split(";")[0];
+  assert.deepEqual(await (await mf.dispatchFetch(origin + "/auth/account", { headers: { cookie: anotherSession } })).json(), { accountId: "12345" });
   const post = (path, cookie, body) => mf.dispatchFetch(origin + path, {
     method: "POST", headers: { origin, cookie, "content-type": "application/json" }, body: JSON.stringify(body),
   });
@@ -257,8 +323,8 @@ try {
   assert.notEqual((await mcp.callTool({ name: "owner_device_copy", arguments: copyArgs })).isError, true);
   assert.notEqual((await mcp.callTool({ name: "owner_device_copy", arguments: copyArgs })).isError, true);
   ownerApproved = false;
-  const read = async (reader, account, cookie, nonce = base64url(randomBytes(32))) => {
-    const body = { agentId: agent.agentId, deviceId: reader.agentId, nonce };
+  const read = async (reader, account, cookie, nonce = base64url(randomBytes(32)), targetAgentId = agent.agentId) => {
+    const body = { agentId: targetAgentId, deviceId: reader.agentId, nonce };
     const timestamp = String(Date.now());
     const signature = await signRequest(reader, "owner-copy-read-v1", timestamp, { ...body, accountId: account });
     return mf.dispatchFetch(origin + "/copy/read", { method: "POST", headers: {
@@ -303,8 +369,6 @@ try {
     "content-type": "application/json", "x-agent-timestamp": expiredTimestamp, "x-agent-signature": expiredSignature,
   }, body: JSON.stringify(expiredPayload) });
   assert.equal(expiredPublish.status, 400);
-  await browserSmoke(sessionCookie, agent.agentId);
-  await browserSmoke(secondSession, agent.agentId, true);
   if (process.env.AGENT_TALK_TEST_RELAY) {
     secondMcp = new Client({ name: "synthetic-peer", version: "1" }, { capabilities: { elicitation: { form: {} } } });
     const peerTransport = new StdioClientTransport({ command: process.execPath,
@@ -326,9 +390,17 @@ try {
     }
     const firstInvite = await invoke(mcp, "profile_export_invite", { displayName: "Synthetic first", expiresInMinutes: 10 });
     const secondInvite = await invoke(secondMcp, "profile_export_invite", { displayName: "Synthetic second", expiresInMinutes: 10 });
+    const firstProfile = await invoke(mcp, "profile_export", { displayName: "Synthetic first", capabilities: [] });
+    const secondProfile = await invoke(secondMcp, "profile_export", { displayName: "Synthetic second", capabilities: [] });
     ownerApproved = true;
-    await invoke(mcp, "contact_confirm", { invite: JSON.stringify(secondInvite) });
-    await invoke(secondMcp, "contact_confirm", { invite: JSON.stringify(firstInvite) });
+    await invoke(mcp, "contact_confirm", { invite: JSON.stringify(secondInvite), profile: JSON.stringify(secondProfile) });
+    await invoke(secondMcp, "contact_confirm", { invite: JSON.stringify(firstInvite), profile: JSON.stringify(firstProfile) });
+    const secondDevice = await createLocalIdentity();
+    const secondPublic = { agentId: secondDevice.agentId, signingPublicKey: secondDevice.signingPublicKey, encryptionPublicKey: secondDevice.encryptionPublicKey };
+    const secondPair = (await (await post("/pairing/start", sessionCookie, { agentId: secondInvite.issuer.agentId, device: secondPublic })).json()).request;
+    const secondApproval = await invoke(secondMcp, "owner_device_approve", { request: secondPair });
+    assert.equal((await post("/pairing/complete", sessionCookie, { approval: secondApproval })).status, 200);
+    await invoke(secondMcp, "owner_device_enable", { portal: localPortal, deviceId: secondDevice.agentId, minutes: 30 });
     portalAvailable = false;
     const received = await invoke(secondMcp, "message_send", { recipientId: agent.agentId, text: "Live synthetic receive" });
     for (let attempt = 0; attempt < 100; attempt++) {
@@ -367,15 +439,118 @@ try {
     assert.equal(outgoingCopies.length, 4);
     const decrypted = await Promise.all(outgoingCopies.map(copy => openOwnerCopy(device, agentIdentity, copy)));
     assert.equal(decrypted.some(copy => JSON.parse(copy).id === sent.id && JSON.parse(copy).text === "Live synthetic send"), true);
+    const { groupId } = await invoke(mcp, "group_create", { name: "Synthetic private group" });
+    const groupInvite = await invoke(mcp, "group_invite", { groupId, target: secondInvite.issuer.agentId });
+    const consent = await invoke(secondMcp, "group_accept", { invite: JSON.stringify(groupInvite) });
+    await invoke(mcp, "group_add", { consent: JSON.stringify(consent) });
+    for (let attempt = 0; attempt < 100; attempt++) {
+      if ((await invoke(secondMcp, "group_list")).some(group => group.groupId === groupId && group.status === "active")) break;
+      await new Promise(resolve => setTimeout(resolve, 50));
+      if (attempt === 99) throw new Error("Synthetic group did not become active.");
+    }
+    const groupAsk = await invoke(secondMcp, "group_ask", { groupId, text: "Synthetic private group question" });
+    for (let attempt = 0; attempt < 100; attempt++) {
+      if ((await invoke(mcp, "group_read", { groupId })).some(post => post.id === groupAsk.id)) break;
+      await new Promise(resolve => setTimeout(resolve, 50));
+      if (attempt === 99) throw new Error("Synthetic group message was not received.");
+    }
+    await invoke(mcp, "group_reply", { groupId, replyTo: groupAsk.messageRef, text: "Synthetic private group reply" });
+    let groupCopies = [];
+    for (let attempt = 0; attempt < 100; attempt++) {
+      groupCopies = (await (await read(device, "12345", sessionCookie)).json()).copies;
+      if (groupCopies.length >= 6) break;
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    assert.equal(groupCopies.length, 6);
+    assert.equal(JSON.stringify(groupCopies).includes("Synthetic private group question"), false);
+    const groupMessages = (await Promise.all(groupCopies.map(copy => openOwnerCopy(device, agentIdentity, copy))))
+      .map(copy => JSON.parse(copy)).filter(copy => copy.groupId === groupId);
+    assert.equal(groupMessages.length, 2);
+    assert.equal(groupMessages.every(copy => copy.direct.threadId === groupAsk.threadId), true);
+    const groupBackfill = await invoke(mcp, "owner_group_backfill", { deviceId: device.agentId, groupId, threadId: groupAsk.threadId });
+    assert.equal(groupBackfill.queued, 2);
+    await new Promise(resolve => setTimeout(resolve, 200));
+    assert.equal((await (await read(device, "12345", sessionCookie)).json()).copies.length, 6);
+    const question = await invoke(mcp, "direct_ask", { recipientId: secondInvite.issuer.agentId, text: "A2 distinct question" });
+    for (let attempt = 0; attempt < 100; attempt++) {
+      if ((await invoke(secondMcp, "inbox_list")).some(item => item.id === question.id)) break;
+      await new Promise(resolve => setTimeout(resolve, 50));
+      if (attempt === 99) throw new Error("A2 did not receive its synthetic question.");
+    }
+    await invoke(secondMcp, "direct_reply", { recipientId: agent.agentId, threadId: question.threadId, replyTo: question.id, text: "A2 distinct reply" });
+    thirdMcp = new Client({ name: "synthetic-third", version: "1" }, { capabilities: { elicitation: { form: {} } } });
+    const thirdTransport = new StdioClientTransport({ command: process.execPath,
+      args: ["--import", "tsx", "adapter/mcp-adapter.ts", "--relay", relayOrigin, "--state", join(directory, "third.json")],
+      cwd: process.cwd(), stderr: "pipe" });
+    thirdTransport.stderr.resume();
+    thirdMcp.setRequestHandler(ElicitRequestSchema, async () => ({ action: "accept", content: { approve: true } }));
+    await thirdMcp.connect(thirdTransport);
+    for (let attempt = 0; attempt < 100; attempt++) {
+      if ((await invoke(thirdMcp, "adapter_status")).socket === "connected") break;
+      await new Promise(resolve => setTimeout(resolve, 50));
+      if (attempt === 99) throw new Error("B's synthetic agent did not connect.");
+    }
+    const thirdInvite = await invoke(thirdMcp, "profile_export_invite", { displayName: "Synthetic third", expiresInMinutes: 10 });
+    const thirdProfile = await invoke(thirdMcp, "profile_export", { displayName: "Synthetic third", capabilities: [] });
+    const secondInviteForThird = await invoke(secondMcp, "profile_export_invite", { displayName: "Synthetic second", expiresInMinutes: 10 });
+    await invoke(secondMcp, "contact_confirm", { invite: JSON.stringify(thirdInvite), profile: JSON.stringify(thirdProfile) });
+    await invoke(thirdMcp, "contact_confirm", { invite: JSON.stringify(secondInviteForThird), profile: JSON.stringify(secondProfile) });
+    const thirdDevice = await createLocalIdentity();
+    const thirdPublic = { agentId: thirdDevice.agentId, signingPublicKey: thirdDevice.signingPublicKey, encryptionPublicKey: thirdDevice.encryptionPublicKey };
+    const thirdPair = (await (await post("/pairing/start", secondSession, { agentId: thirdInvite.issuer.agentId, device: thirdPublic })).json()).request;
+    const thirdApproval = await invoke(thirdMcp, "owner_device_approve", { request: thirdPair });
+    assert.equal((await post("/pairing/complete", secondSession, { approval: thirdApproval })).status, 200);
+    await invoke(thirdMcp, "owner_device_enable", { portal: localPortal, deviceId: thirdDevice.agentId, minutes: 30 });
+    await invoke(thirdMcp, "message_send", { recipientId: secondInvite.issuer.agentId, text: "B3 private history" });
+    for (let attempt = 0; attempt < 100; attempt++) {
+      const thirdCopies = (await (await read(thirdDevice, "67890", secondSession, undefined, thirdInvite.issuer.agentId)).json()).copies;
+      if (thirdCopies.length) break;
+      await new Promise(resolve => setTimeout(resolve, 50));
+      if (attempt === 99) throw new Error("B3 owner copy was not delivered.");
+    }
+    const thirdInviteForFirst = await invoke(thirdMcp, "profile_export_invite", { displayName: "Synthetic third", expiresInMinutes: 10 });
+    const firstInviteForThird = await invoke(mcp, "profile_export_invite", { displayName: "Synthetic first", expiresInMinutes: 10 });
+    await invoke(mcp, "contact_confirm", { invite: JSON.stringify(thirdInviteForFirst), profile: JSON.stringify(thirdProfile) });
+    await invoke(thirdMcp, "contact_confirm", { invite: JSON.stringify(firstInviteForThird), profile: JSON.stringify(firstProfile) });
+    const lateInvite = await invoke(mcp, "group_invite", { groupId, target: thirdInvite.issuer.agentId });
+    const lateConsent = await invoke(thirdMcp, "group_accept", { invite: JSON.stringify(lateInvite) });
+    await invoke(mcp, "group_add", { consent: JSON.stringify(lateConsent) });
+    for (let attempt = 0; attempt < 100; attempt++) {
+      if ((await invoke(thirdMcp, "group_list")).some(group => group.groupId === groupId && group.status === "active")) break;
+      await new Promise(resolve => setTimeout(resolve, 50));
+      if (attempt === 99) throw new Error("Late group member did not become active.");
+    }
+    assert.equal((await invoke(thirdMcp, "group_read", { groupId })).some(post => post.id === groupAsk.id), false);
+    await invoke(mcp, "group_remove", { groupId, target: thirdInvite.issuer.agentId });
+    const afterRemoval = await invoke(secondMcp, "group_ask", { groupId, text: "Group message after B3 removal" });
+    for (let attempt = 0; attempt < 100; attempt++) {
+      if ((await invoke(mcp, "group_read", { groupId })).some(post => post.id === afterRemoval.id)) break;
+      await new Promise(resolve => setTimeout(resolve, 50));
+      if (attempt === 99) throw new Error("Post-removal group message did not reach remaining member.");
+    }
+    assert.equal((await invoke(thirdMcp, "group_read", { groupId })).some(post => post.id === afterRemoval.id), false);
+    const thirdState = JSON.parse(await readFile(join(directory, "third.json"), "utf8"));
+    const thirdStoredCopies = (await (await read(thirdDevice, "67890", secondSession, undefined, thirdInvite.issuer.agentId)).json()).copies;
+    const thirdMessages = await Promise.all(thirdStoredCopies.map(copy => openOwnerCopy(thirdDevice, thirdState.identity, copy)));
+    assert.equal(thirdMessages.some(message => JSON.parse(message).groupId === groupId), false);
+    assert.equal((await read(secondDevice, "12345", sessionCookie, undefined, agent.agentId)).status, 403);
+    assert.equal((await read(thirdDevice, "67890", secondSession, undefined, secondInvite.issuer.agentId)).status, 403);
+    await browserSmoke(anotherSession, agent.agentId, false, {
+      secondAgentId: secondInvite.issuer.agentId, threadId: question.threadId,
+      secondSession, thirdAgentId: thirdInvite.issuer.agentId,
+    });
     ownerApproved = false;
-    console.log("Two local MCP agents delivered live incoming and outgoing copies; portal outage retained the durable queue.");
+    console.log("Three local MCP agents delivered isolated direct and group copies; portal outage retained the durable queue.");
+  } else {
+    await browserSmoke(sessionCookie, agent.agentId);
+    await browserSmoke(secondSession, agent.agentId, true);
   }
   await post("/device/revoke", secondSession, { agentId: agent.agentId, deviceId: device.agentId });
   const beforeRevocation = await (await mf.dispatchFetch(origin + "/agents", { headers: { cookie: sessionCookie } })).json();
-  assert.equal(beforeRevocation.agents.find(item => item.agentId === agent.agentId).devices.length, 2);
+  assert.equal(beforeRevocation.agents.find(item => item.agentId === agent.agentId).devices.length, process.env.AGENT_TALK_TEST_RELAY ? 1 : 2);
   assert.equal((await post("/device/revoke", sessionCookie, { agentId: agent.agentId, deviceId: device.agentId })).status, 200);
   const afterRevocation = await (await mf.dispatchFetch(origin + "/agents", { headers: { cookie: sessionCookie } })).json();
-  assert.equal(afterRevocation.agents.find(item => item.agentId === agent.agentId).devices.length, 1);
+  assert.equal(afterRevocation.agents.find(item => item.agentId === agent.agentId).devices.length, process.env.AGENT_TALK_TEST_RELAY ? 0 : 1);
   assert.equal((await read(device, "12345", sessionCookie)).status, 403);
   ownerApproved = true;
   assert.equal((await mcp.callTool({ name: "owner_device_copy", arguments: copyArgs })).isError, true);
@@ -397,6 +572,7 @@ try {
   console.log("Portal HTTP login, account isolation, pairing, denial, replay, revocation and logout passed.");
 } finally {
   if (chrome) chrome.kill("SIGTERM");
+  if (thirdMcp) await thirdMcp.close();
   if (secondMcp) await secondMcp.close();
   if (mcp) await mcp.close();
   await new Promise(resolve => proxy.close(resolve));

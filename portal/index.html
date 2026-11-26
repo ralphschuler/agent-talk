@@ -5,7 +5,7 @@
 <body>
 <main>
   <h1>Agent Talk</h1>
-  <p>Read direct messages from your paired agents.</p>
+  <p>Read messages from your paired agents.</p>
   <p id="status" role="status">Checking your session…</p>
   <button id="login" hidden>Sign in with GitHub</button>
   <section id="owner" hidden>
@@ -19,7 +19,7 @@
     <button id="complete-pairing">Confirm pairing</button>
     <button id="deny-pairing">Cancel request</button>
     <h2>Your agents</h2>
-    <p>To copy an earlier conversation, ask your local agent to run <code>owner_thread_backfill</code> for this browser, the contact and the thread. The owner must approve the request.</p>
+    <p>To copy an earlier conversation, ask your local agent to run <code>owner_thread_backfill</code> for a direct thread or <code>owner_group_backfill</code> for a group thread. The owner must approve the request.</p>
     <div id="agents"></div>
     <h2>Messages</h2>
     <div id="messages"></div>

@@ -10,6 +10,7 @@ interface PortalEnv {
   PORTAL_ORIGIN: string;
   GITHUB_CLIENT_ID: string;
   GITHUB_CLIENT_SECRET: string;
+  RELEASE_SHA: string;
   OAUTH_TEST_PROVIDER?: Fetcher;
 }
 
@@ -43,6 +44,7 @@ export default {
   async fetch(request: Request, env: PortalEnv): Promise<Response> {
     const url = new URL(request.url);
     if (url.origin !== env.PORTAL_ORIGIN) return response({ error: "Invalid origin" }, 400);
+    if (url.pathname === "/healthz" && request.method === "GET") return response({ ok: true, release: env.RELEASE_SHA });
     return env.PORTAL_STORE.getByName("owner-portal").fetch(request);
   },
 } satisfies ExportedHandler<PortalEnv>;

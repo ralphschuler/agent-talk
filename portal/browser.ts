@@ -7,6 +7,7 @@ const element = <T extends HTMLElement>(id: string) => document.getElementById(i
 const status = element<HTMLElement>("status");
 let accountId = "";
 let pending: { request: PairingRequest; device: LocalIdentity } | undefined;
+let selectionVersion = 0;
 
 function database(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
@@ -63,8 +64,9 @@ async function listAgents() {
       revoke.textContent = "Revoke this browser";
       revoke.addEventListener("click", run(async () => {
         if (!window.confirm("Revoke this browser's access to agent " + entry.agentId + "?")) return;
-        await api("/device/revoke", { agentId: entry.agentId, deviceId: record.device.agentId });
+        selectionVersion++;
         element<HTMLElement>("messages").replaceChildren();
+        await api("/device/revoke", { agentId: entry.agentId, deviceId: record.device.agentId });
         status.textContent = "Browser access revoked.";
         await listAgents();
       }));
@@ -74,24 +76,27 @@ async function listAgents() {
 }
 
 async function readAgent(agentId: string) {
+  const selection = ++selectionVersion;
+  const container = element<HTMLElement>("messages");
+  container.replaceChildren();
   const record = await deviceRecord(agentId);
   if (!record?.agent) throw new Error("Pair this browser with the agent before reading.");
   const body = { agentId, deviceId: record.device.agentId, nonce: base64url(crypto.getRandomValues(new Uint8Array(32))) };
   const timestamp = String(Date.now());
   const signature = await signRequest(record.device, "owner-copy-read-v1", timestamp, { ...body, accountId });
   const { copies } = await api("/copy/read", body, { "x-device-timestamp": timestamp, "x-device-signature": signature });
-  const container = element<HTMLElement>("messages");
-  container.replaceChildren();
   const threads = new Map<string, Array<{ text: string; senderId: string; time: number }>>();
   for (const copy of copies) {
     const message = JSON.parse(await openOwnerCopy(record.device, record.agent, copy));
     if (typeof message.text !== "string" || typeof message.senderId !== "string" ||
         typeof message.receivedAt !== "number") throw new Error("Invalid encrypted message.");
-    const thread = typeof message.direct?.threadId === "string" ? message.direct.threadId : "Other messages";
+    const threadId = typeof message.direct?.threadId === "string" ? message.direct.threadId : "Other messages";
+    const thread = typeof message.groupId === "string" ? "Group " + message.groupId + " · " + threadId : threadId;
     const entries = threads.get(thread) ?? [];
     entries.push({ text: message.text, senderId: message.senderId, time: message.receivedAt });
     threads.set(thread, entries);
   }
+  const fragment = document.createDocumentFragment();
   for (const [thread, entries] of threads) {
     const section = document.createElement("section");
     const heading = document.createElement("h3");
@@ -107,8 +112,10 @@ async function readAgent(agentId: string) {
       article.append(label, text);
       section.append(article);
     }
-    container.append(section);
+    fragment.append(section);
   }
+  if (selection !== selectionVersion) return;
+  container.replaceChildren(fragment);
   status.textContent = "Messages loaded.";
 }
 
@@ -118,7 +125,12 @@ element<HTMLButtonElement>("login").onclick = run(async () => {
   if (target.origin !== "https://github.com" || target.pathname !== "/login/oauth/authorize") throw new Error("Invalid login destination.");
   location.assign(target.href);
 });
-element<HTMLButtonElement>("logout").onclick = run(async () => { await api("/auth/logout", {}); location.reload(); });
+element<HTMLButtonElement>("logout").onclick = run(async () => {
+  selectionVersion++;
+  element<HTMLElement>("messages").replaceChildren();
+  await api("/auth/logout", {});
+  location.reload();
+});
 element<HTMLButtonElement>("start-pairing").onclick = run(async () => {
   const agentId = element<HTMLInputElement>("agent-id").value.trim();
   const existing = await deviceRecord(agentId);
