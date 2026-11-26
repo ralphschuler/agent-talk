@@ -7,7 +7,7 @@ import { approvePairing } from "../portal/pairing.ts";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { ElicitRequestSchema } from "@modelcontextprotocol/sdk/types.js";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "node:http";
@@ -31,18 +31,23 @@ const mock = `export default { async fetch(request) {
   }
   return new Response("", { status: 404 });
 } }`;
-const mf = new Miniflare(convertV4MiniflareOptions({ workers: [
+const directory = await mkdtemp(join(tmpdir(), "agent-talk-portal-test-"));
+const storagePath = join(directory, "worker-storage");
+const mf = new Miniflare({ ...convertV4MiniflareOptions({ workers: [
   { name: "portal", modules: true, script: bundle.outputFiles[0].text, compatibilityDate: "2026-11-26",
     bindings: { PORTAL_ORIGIN: "https://portal.example.test", GITHUB_CLIENT_ID: "test", GITHUB_CLIENT_SECRET: "synthetic-secret" },
     durableObjects: { PORTAL_STORE: { className: "PortalStore", useSQLite: true } },
     serviceBindings: { OAUTH_TEST_PROVIDER: "github-mock" } },
   { name: "github-mock", modules: true, script: mock, compatibilityDate: "2026-11-26" },
-] }));
-const directory = await mkdtemp(join(tmpdir(), "agent-talk-portal-test-"));
+] }), resourcePersistencePath: storagePath });
 const relayOrigin = process.env.AGENT_TALK_TEST_RELAY ?? "http://127.0.0.1:9";
 const agentIdentity = await createLocalIdentity();
 const sender = await createLocalIdentity();
 const sample = "Is the development preview ready for review?";
+const privateMarkers = [agentIdentity.signingSecretKey, agentIdentity.encryptionSecretKey, sender.signingSecretKey,
+  sender.encryptionSecretKey, "synthetic-token", "synthetic-secret", sample, "A second synthetic message",
+  "Live synthetic receive", "Live synthetic send", "Synthetic private group question", "Synthetic private group reply",
+  "A2 distinct question", "A2 distinct reply", "B3 private history"];
 await writeFile(join(directory, "state.json"), JSON.stringify({
   version: 2, relay: relayOrigin, identity: agentIdentity, contacts: {}, consumedInviteIds: {}, seen: {},
   inbox: [{ id: "synthetic-message", senderId: sender.agentId, text: sample, receivedAt: Date.now(),
@@ -301,6 +306,7 @@ try {
   const agent = { agentId: JSON.parse(agentStatus.content[0].text).agentId };
   const otherAgent = await createLocalIdentity();
   const device = await createLocalIdentity();
+  privateMarkers.push(device.signingSecretKey, device.encryptionSecretKey);
   const publicDevice = { agentId: device.agentId, signingPublicKey: device.signingPublicKey, encryptionPublicKey: device.encryptionPublicKey };
   const start = await post("/pairing/start", sessionCookie, { agentId: agent.agentId, device: publicDevice });
   assert.equal(start.status, 201);
@@ -400,6 +406,8 @@ try {
       await new Promise(resolve => setTimeout(resolve, 50));
       if (attempt === 99) throw new Error("Synthetic agents did not connect.");
     }
+    const peerState = JSON.parse(await readFile(join(directory, "peer.json"), "utf8"));
+    privateMarkers.push(peerState.identity.signingSecretKey, peerState.identity.encryptionSecretKey);
     const firstInvite = await invoke(mcp, "profile_export_invite", { displayName: "Synthetic first", expiresInMinutes: 10 });
     const secondInvite = await invoke(secondMcp, "profile_export_invite", { displayName: "Synthetic second", expiresInMinutes: 10 });
     const firstProfile = await invoke(mcp, "profile_export", { displayName: "Synthetic first", capabilities: [] });
@@ -408,6 +416,7 @@ try {
     await invoke(mcp, "contact_confirm", { invite: JSON.stringify(secondInvite), profile: JSON.stringify(secondProfile) });
     await invoke(secondMcp, "contact_confirm", { invite: JSON.stringify(firstInvite), profile: JSON.stringify(firstProfile) });
     const secondDevice = await createLocalIdentity();
+    privateMarkers.push(secondDevice.signingSecretKey, secondDevice.encryptionSecretKey);
     const secondPublic = { agentId: secondDevice.agentId, signingPublicKey: secondDevice.signingPublicKey, encryptionPublicKey: secondDevice.encryptionPublicKey };
     const secondPair = (await (await post("/pairing/start", sessionCookie, { agentId: secondInvite.issuer.agentId, device: secondPublic })).json()).request;
     const secondApproval = await invoke(secondMcp, "owner_device_approve", { request: secondPair });
@@ -514,6 +523,7 @@ try {
     await invoke(secondMcp, "contact_confirm", { invite: JSON.stringify(thirdInvite), profile: JSON.stringify(thirdProfile) });
     await invoke(thirdMcp, "contact_confirm", { invite: JSON.stringify(secondInviteForThird), profile: JSON.stringify(secondProfile) });
     const thirdDevice = await createLocalIdentity();
+    privateMarkers.push(thirdDevice.signingSecretKey, thirdDevice.encryptionSecretKey);
     const thirdPublic = { agentId: thirdDevice.agentId, signingPublicKey: thirdDevice.signingPublicKey, encryptionPublicKey: thirdDevice.encryptionPublicKey };
     const thirdPair = (await (await post("/pairing/start", secondSession, { agentId: thirdInvite.issuer.agentId, device: thirdPublic })).json()).request;
     const thirdApproval = await invoke(thirdMcp, "owner_device_approve", { request: thirdPair });
@@ -548,6 +558,7 @@ try {
     }
     assert.equal((await invoke(thirdMcp, "group_read", { groupId })).some(post => post.id === afterRemoval.id), false);
     const thirdState = JSON.parse(await readFile(join(directory, "third.json"), "utf8"));
+    privateMarkers.push(thirdState.identity.signingSecretKey, thirdState.identity.encryptionSecretKey);
     const thirdStoredCopies = (await (await read(thirdDevice, "67890", secondSession, undefined, thirdInvite.issuer.agentId)).json()).copies;
     const thirdMessages = await Promise.all(thirdStoredCopies.map(copy => openOwnerCopy(thirdDevice, thirdState.identity, copy)));
     assert.equal(thirdMessages.some(message => JSON.parse(message).groupId === groupId), false);
@@ -594,6 +605,21 @@ try {
   if (secondMcp) await secondMcp.close();
   if (mcp) await mcp.close();
   await new Promise(resolve => proxy.close(resolve));
-  await rm(directory, { recursive: true, force: true });
   await mf.dispose();
+  async function inspectDirectory(path) {
+    let found = 0;
+    for (const entry of await readdir(path, { withFileTypes: true })) {
+      const full = join(path, entry.name);
+      if (entry.isDirectory()) found += await inspectDirectory(full);
+      else if (entry.isFile()) {
+        const contents = await readFile(full);
+        for (const marker of privateMarkers) assert.equal(contents.includes(Buffer.from(marker)), false, "Worker storage contained a private marker.");
+        found++;
+      }
+    }
+    return found;
+  }
+  assert.ok(await inspectDirectory(storagePath) > 0, "Expected persistent Worker storage.");
+  console.log("Synthetic persistent Worker files contained no tested private keys, OAuth values or message text.");
+  await rm(directory, { recursive: true, force: true });
 }
