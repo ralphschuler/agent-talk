@@ -1,18 +1,21 @@
-import { checkOfflineReplay, checkPortalRetry, prepareSyntheticScenario } from "./owner-live-fixture.mjs";
+import { checkOfflineReplay, checkPortalRetry, inspectOfflineSyntheticStorage, prepareSyntheticScenario } from "./owner-live-fixture.mjs";
 // Interactive staging scenario. No credentials or browser state leave this machine.
-// This preliminary runner does not emit release evidence or unlock production.
+// Its sanitized local observation does not unlock production.
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { createRequire } from "node:module";
-import { mkdtemp, rm } from "node:fs/promises";
+import { lstat, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createInterface } from "node:readline/promises";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { getDefaultEnvironment, StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { ElicitRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { waitForHumanSignIn } from "./owner-live-human-signin.mjs";
 import { runOwnerBrowserScenario } from "./owner-browser-scenario.mjs";
+import { checkLiveStorage, getStagingDeployment } from "./owner-live-storage-check.mjs";
+import { writeSanitizedObservation } from "./owner-live-record.mjs";
 
 const portal = "https://agent-talk-owner-test.ralph-cfd.workers.dev";
 const relay = "https://agent-talk-test.ralph-cfd.workers.dev";
@@ -38,11 +41,24 @@ async function waitForValue(fn, description) {
 
 async function main() {
   const settings = liveSettings(process.env, process.stdin.isTTY && process.stdout.isTTY);
+  const account = process.env.CLOUDFLARE_ACCOUNT_ID;
+  const token = process.env.CLOUDFLARE_API_TOKEN;
+  const evidencePath = process.env.OWNER_LIVE_EVIDENCE_PATH;
+  assert.match(account ?? "", /^[a-f0-9]{32}$/i, "Cloudflare account ID is unavailable.");
+  assert.ok(token, "Cloudflare API token is unavailable.");
+  assert.ok(evidencePath, "Set OWNER_LIVE_EVIDENCE_PATH to a new local output file.");
+  try { await lstat(evidencePath); throw new Error("The evidence output already exists."); }
+  catch (error) { if (error.code !== "ENOENT") throw error; }
+  assert.equal(execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim(), settings.release,
+    "The local checkout is not the requested staging commit.");
+  assert.equal(execFileSync("git", ["status", "--porcelain"], { encoding: "utf8" }).trim(), "",
+    "Use a clean verified checkout for the interactive staging run.");
   const checkRelease = async () => {
     const health = await fetch(portal + "/healthz", { redirect: "error", signal: AbortSignal.timeout(20_000) });
     assert.ok(health.ok && (await health.json()).release === settings.release, "The expected staging commit is not live.");
   };
   await checkRelease();
+  const expectedDeployment = await getStagingDeployment({ account, token, release: settings.release });
   const requireHost = createRequire(join(resolve(process.env.OPENCLAW_PACKAGE_DIR), "package.json"));
   assert.equal(requireHost("./package.json").version, "2026.11.10", "Use the verified OpenClaw version.");
   const { chromium } = requireHost("playwright-core");
@@ -51,6 +67,7 @@ async function main() {
   const clients = [];
   const outageFlag = join(dir, "portal-outage");
   let browser;
+  let storageObservation;
   async function approve(message) {
     console.log("\nOwner confirmation for disposable test identities:\n" + message);
     return (await input.question('Type "yes" to approve; anything else declines: ')).trim() === "yes";
@@ -60,7 +77,7 @@ async function main() {
     const transport = new StdioClientTransport({ command: process.execPath,
       args: ["--import", "tsx", "adapter/mcp-adapter.ts", "--relay", relay, "--state", join(dir, name + ".json")],
       cwd: process.cwd(), stderr: "pipe", ...(name === "a1" && { env: {
-        ...process.env, NODE_OPTIONS: "--import=" + resolve("scripts/owner-live-portal-outage.mjs"),
+        NODE_OPTIONS: "--import=" + resolve("scripts/owner-live-portal-outage.mjs"),
         OWNER_TEST_PORTAL_ORIGIN: portal, OWNER_TEST_BLOCK_FILE: outageFlag,
       } }) });
     transport.stderr.resume();
@@ -83,7 +100,8 @@ async function main() {
     b3 = await checkOfflineReplay({ sender: a2, receiver: b3, receiverId: three.agentId,
       restart: () => agent("b3"), invoke, waitForValue });
     browser = await chromium.launchPersistentContext(join(dir, "browser"), {
-      headless: false, ...(process.env.TEST_BROWSER_EXECUTABLE && { executablePath: process.env.TEST_BROWSER_EXECUTABLE }),
+      headless: false, env: getDefaultEnvironment(),
+      ...(process.env.TEST_BROWSER_EXECUTABLE && { executablePath: process.env.TEST_BROWSER_EXECUTABLE }),
     });
     const page = browser.pages()[0] ?? await browser.newPage();
     await page.goto(portal + "/", { waitUntil: "domcontentloaded" });
@@ -127,6 +145,12 @@ async function main() {
           },
         });
       },
+      inspectStorage: async deviceId => {
+        storageObservation = await inspectOfflineSyntheticStorage({ sender: a1, receiver: b3, senderId: one.agentId,
+          recipientId: three.agentId, deviceId, groupId, statePaths: [join(dir, "a1.json"), join(dir, "a2.json")],
+          invoke, waitForValue, checkStorage: input => checkLiveStorage({ ...input, account, token,
+            release: settings.release, expectedDeployment }) });
+      },
       delayRead: async target => {
         const handler = async route => {
           let body;
@@ -153,7 +177,13 @@ async function main() {
       },
     });
     await checkRelease();
-    console.log("Interactive browser scenario passed. It is preliminary and does not create release evidence.");
+    assert.ok(storageObservation, "The staging storage inspection did not run.");
+    assert.deepEqual(await getStagingDeployment({ account, token, release: settings.release }), expectedDeployment,
+      "The staging deployment changed during the interactive scenario.");
+    await writeSanitizedObservation({ path: evidencePath, release: settings.release,
+      deployment: expectedDeployment, storage: storageObservation.result, routing: storageObservation.routing,
+      materialDigests: storageObservation.materialDigests });
+    console.log("Interactive staging checks passed and a sanitized local observation was written. Production remains gated.");
   } finally {
     if (browser) await browser.close().catch(() => {});
     await Promise.allSettled(clients.reverse().map(client => client.close()));

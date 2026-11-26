@@ -36,6 +36,7 @@ jobs:
       - run: node scripts/test-owner-live-human-signin.mjs
       - run: node scripts/test-owner-live-e2e.mjs
       - run: node scripts/test-owner-live-outage.mjs
+      - run: node scripts/test-owner-live-record.mjs
       - name: Verify owner portal and real local MCP clients
         run: |
           npm run dev > "$RUNNER_TEMP/agent-talk-relay.log" 2>&1 &

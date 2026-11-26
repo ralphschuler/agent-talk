@@ -56,6 +56,55 @@ function inspect(value, markers) {
   }
 }
 
+export async function getStagingDeployment({ account, token, release, fetcher = fetch }) {
+  assert.match(account ?? "", /^[a-f0-9]{32}$/i, "Invalid Cloudflare account ID.");
+  assert.ok(typeof token === "string" && token.length > 0, "Cloudflare token is missing.");
+  assert.match(release ?? "", /^[a-f0-9]{40}$/, "Invalid staging release.");
+  const base = API + account + "/workers";
+  async function request(path) {
+    const response = await fetcher(base + path, { headers: { authorization: "Bearer " + token, "content-type": "application/json" },
+      redirect: "error", signal: AbortSignal.timeout(20_000) });
+    assert.ok(response.ok, "Cloudflare deployment inspection failed with HTTP " + response.status);
+    const data = await response.json();
+    assert.equal(data.success, true, "Cloudflare deployment inspection was unsuccessful.");
+    return data;
+  }
+  async function exactRelease() {
+    const response = await fetcher("https://agent-talk-owner-test.ralph-cfd.workers.dev/healthz",
+      { redirect: "error", signal: AbortSignal.timeout(20_000) });
+    assert.ok(response.ok, "Staging health check failed.");
+    const health = await response.json();
+    assert.ok(health.ok === true && health.release === release, "Staging is not running the expected release.");
+  }
+  const settings = (await request("/scripts/agent-talk-owner-test/settings")).result;
+  assert.ok(settings.bindings?.some(item => item.name === "PROJECT_OWNER" && item.type === "plain_text" &&
+    item.text === "ralphschuler/agent-talk:owner-test"), "Staging ownership marker does not match.");
+  async function activeDeployment() {
+    const deployments = [];
+    for (let page = 1; ; page++) {
+      const data = await request("/scripts/agent-talk-owner-test/deployments?per_page=100&page=" + page);
+      assert.ok(Array.isArray(data.result?.deployments), "Staging deployment inventory is invalid.");
+      deployments.push(...data.result.deployments);
+      if (page >= (data.result_info?.total_pages ?? 1)) break;
+    }
+    assert.ok(deployments.length > 0 && deployments.every(item => Number.isFinite(Date.parse(item.created_on))),
+      "Staging has no valid deployment.");
+    deployments.sort((left, right) => Date.parse(right.created_on) - Date.parse(left.created_on));
+    if (deployments.length > 1) assert.notEqual(deployments[0].created_on, deployments[1].created_on, "Staging deployment order is ambiguous.");
+    const active = deployments[0];
+    assert.ok(Array.isArray(active.versions) && active.versions.length === 1 && active.versions[0].percentage === 100 &&
+      (uuidPattern.test(active.id ?? "") || /^[a-f0-9]{32}$/i.test(active.id ?? "")) &&
+      uuidPattern.test(active.versions[0].version_id ?? ""), "Staging must serve one complete version.");
+    const versionId = active.versions[0].version_id;
+    const version = (await request("/scripts/agent-talk-owner-test/versions/" + encodeURIComponent(versionId))).result;
+    assert.ok(version.id === versionId && version.annotations?.["workers/message"] === release,
+      "The active staging version is not the expected commit.");
+    return { deploymentId: active.id, versionId };
+  }
+  await exactRelease();
+  return activeDeployment();
+}
+
 export async function checkLiveStorage({ account, token, release, agentId, deviceId, recipientId, groupId,
   offlineMessageId, groupMessageId, messageMarkers, privateKeys, materialDigests, expectedDeployment, fetcher = fetch }) {
   assert.ok(typeof account === "string" && /^[a-f0-9]{32}$/i.test(account), "Invalid Cloudflare account ID.");
@@ -90,40 +139,8 @@ export async function checkLiveStorage({ account, token, release, agentId, devic
     assert.equal(data.success, true, "Cloudflare storage inspection was unsuccessful.");
     return data;
   }
-  async function exactRelease() {
-    const response = await fetcher("https://agent-talk-owner-test.ralph-cfd.workers.dev/healthz",
-      { redirect: "error", signal: AbortSignal.timeout(20_000) });
-    assert.ok(response.ok, "Staging health check failed.");
-    const health = await response.json();
-    assert.ok(health.ok === true && health.release === release, "Staging is not running the expected release.");
-  }
-  await exactRelease();
-  const settings = (await request("/scripts/agent-talk-owner-test/settings")).result;
-  assert.ok(settings.bindings?.some(item => item.name === "PROJECT_OWNER" && item.type === "plain_text" &&
-    item.text === "ralphschuler/agent-talk:owner-test"), "Staging ownership marker does not match.");
-  async function activeDeployment() {
-    const deployments = [];
-    for (let page = 1; ; page++) {
-      const data = await request("/scripts/agent-talk-owner-test/deployments?per_page=100&page=" + page);
-      assert.ok(Array.isArray(data.result?.deployments), "Staging deployment inventory is invalid.");
-      deployments.push(...data.result.deployments);
-      if (page >= (data.result_info?.total_pages ?? 1)) break;
-    }
-    assert.ok(deployments.length > 0 && deployments.every(item => Number.isFinite(Date.parse(item.created_on))),
-      "Staging has no valid deployment.");
-    deployments.sort((left, right) => Date.parse(right.created_on) - Date.parse(left.created_on));
-    if (deployments.length > 1) assert.notEqual(deployments[0].created_on, deployments[1].created_on, "Staging deployment order is ambiguous.");
-    const active = deployments[0];
-    assert.ok(Array.isArray(active.versions) && active.versions.length === 1 && active.versions[0].percentage === 100 &&
-      (uuidPattern.test(active.id ?? "") || /^[a-f0-9]{32}$/i.test(active.id ?? "")) &&
-      uuidPattern.test(active.versions[0].version_id ?? ""), "Staging must serve one complete version.");
-    const versionId = active.versions[0].version_id;
-    const version = (await request("/scripts/agent-talk-owner-test/versions/" + encodeURIComponent(versionId))).result;
-    assert.ok(version.id === versionId && version.annotations?.["workers/message"] === release,
-      "The active staging version is not the expected commit.");
-    return { deploymentId: active.id, versionId };
-  }
-  const before = await activeDeployment();
+  const deployment = () => getStagingDeployment({ account, token, release, fetcher });
+  const before = await deployment();
   if (expectedDeployment) assert.deepEqual(before, expectedDeployment, "Staging deployment does not match the evidence.");
   const namespaces = [];
   for (let page = 1; ; page++) {
@@ -185,10 +202,9 @@ export async function checkLiveStorage({ account, token, release, agentId, devic
     group.actor === agentId && group.relay === "https://agent-talk-test.ralph-cfd.workers.dev" &&
     Number.isSafeInteger(group.epoch) && group.epoch >= 0 && canonicalBytes(group.signature, 64) &&
     canonicalBytes(group.wire, 16, 65_536), "The test group record does not contain the expected encrypted application.");
-  await exactRelease();
-  const after = await activeDeployment();
+  const after = await deployment();
   assert.deepEqual(after, before, "Staging deployment changed during inspection.");
-  return { ownerRows: ownerRows.length, mailboxRows: mailboxRows.length, groupRows: groupRows.length };
+  return { ownerRows: ownerRows.length, mailboxRows: mailboxRows.length, groupRows: groupRows.length, deployment: before };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

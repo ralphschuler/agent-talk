@@ -77,14 +77,14 @@ function fakeFetch(mode) {
   };
 }
 
-assert.deepEqual(await checkLiveStorage({ ...input, fetcher: fakeFetch("safe") }), { ownerRows: 1, mailboxRows: 1, groupRows: 1 });
+assert.deepEqual(await checkLiveStorage({ ...input, fetcher: fakeFetch("safe") }), { ownerRows: 1, mailboxRows: 1, groupRows: 1, deployment: { deploymentId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", versionId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc" } });
 const { messageMarkers, privateKeys, ...publicInput } = input;
 const materialDigests = syntheticMaterialDigests(messageMarkers, privateKeys);
 const expectedDeployment = { deploymentId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", versionId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc" };
 assert.equal(JSON.stringify(materialDigests).includes(syntheticMarker), false);
 for (const key of privateKeys) assert.equal(JSON.stringify(materialDigests).includes(key), false);
 assert.deepEqual(await checkLiveStorage({ ...publicInput, materialDigests, expectedDeployment, fetcher: fakeFetch("safe") }),
-  { ownerRows: 1, mailboxRows: 1, groupRows: 1 });
+  { ownerRows: 1, mailboxRows: 1, groupRows: 1, deployment: { deploymentId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", versionId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc" } });
 await assert.rejects(checkLiveStorage({ ...publicInput, materialDigests, expectedDeployment, fetcher: fakeFetch("leak") }), /Private test material/);
 await assert.rejects(checkLiveStorage({ ...publicInput, materialDigests, expectedDeployment, fetcher: fakeFetch("binary-key-leak") }), /Private test material/);
 await assert.rejects(checkLiveStorage({ ...publicInput, materialDigests, fetcher: fakeFetch("safe") }), /exact staging deployment/);

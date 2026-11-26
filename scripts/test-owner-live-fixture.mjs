@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { ElicitRequestSchema } from "@modelcontextprotocol/sdk/types.js";
-import { checkOfflineReplay, prepareSyntheticScenario } from "./owner-live-fixture.mjs";
+import { checkOfflineReplay, inspectOfflineSyntheticStorage, prepareSyntheticScenario } from "./owner-live-fixture.mjs";
 const relay = process.env.AGENT_TALK_TEST_RELAY;
 assert.equal(relay, "http://localhost:5173", "This fixture can only contact the local test relay.");
 const dir = await mkdtemp(join(tmpdir(), "agent-talk-local-live-fixture-"));
@@ -38,7 +38,7 @@ try {
   const a2 = await agent("a2");
   const b3 = await agent("b3");
   const fixture = await prepareSyntheticScenario({ a1, a2, b3, invoke, waitForValue });
-  await checkOfflineReplay({ sender: a2, receiver: b3, receiverId: fixture.three.agentId,
+  const restarted = await checkOfflineReplay({ sender: a2, receiver: b3, receiverId: fixture.three.agentId,
     restart: () => agent("b3"), invoke, waitForValue });
   await waitForValue(async () => (await invoke(a2, "direct_thread", { peerId: fixture.one.agentId, threadId: fixture.second.threadId })).messages.length === 2, "Second thread");
   const first = await invoke(a1, "direct_thread", { peerId: fixture.two.agentId, threadId: fixture.first.threadId });
@@ -47,6 +47,22 @@ try {
   const group = await invoke(a1, "group_read", { groupId: fixture.groupId });
   assert.equal(group.length, 2);
   assert.ok(group.some(item => item.text === "Synthetic private group reply"));
+  const fakeDevice = "at1_" + "A".repeat(43);
+  const localOnly = await inspectOfflineSyntheticStorage({ sender: a1, receiver: restarted,
+    senderId: fixture.one.agentId, recipientId: fixture.three.agentId, deviceId: fakeDevice, groupId: fixture.groupId,
+    statePaths: [join(dir, "a1"), join(dir, "a2")], invoke, waitForValue,
+    checkStorage: async input => {
+      assert.equal(input.agentId, fixture.one.agentId);
+      assert.equal(input.recipientId, fixture.three.agentId);
+      assert.equal(input.privateKeys.length, 4);
+      assert.equal(input.messageMarkers.length, 2);
+      assert.notEqual(input.offlineMessageId, input.groupMessageId);
+      return { mode: "synthetic-fixture", productionApproval: false };
+    },
+  });
+  assert.deepEqual(localOnly.result, { mode: "synthetic-fixture", productionApproval: false });
+  assert.equal(localOnly.routing.agentId, fixture.one.agentId);
+  assert.equal(localOnly.materialDigests.length, 18);
   console.log("Local-only staging fixture generated and verified real direct and group traffic with three disposable MCP agents.");
 } finally {
   await Promise.allSettled(clients.map(client => client.close()));

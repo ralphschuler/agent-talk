@@ -1,6 +1,7 @@
 // Prepare real relay traffic using caller-supplied disposable MCP agents.
 import assert from "node:assert/strict";
 import { readFile, rm, unlink, writeFile } from "node:fs/promises";
+import { syntheticMaterialDigests } from "./owner-live-storage-check.mjs";
 
 export async function prepareSyntheticScenario({ a1, a2, b3, invoke, waitForValue }) {
   async function link(left, right) {
@@ -17,6 +18,7 @@ export async function prepareSyntheticScenario({ a1, a2, b3, invoke, waitForValu
   assert.equal(new Set([one.agentId, two.agentId, three.agentId]).size, 3);
   await link(a1, a2);
   await link(a2, b3);
+  await link(a1, b3);
   const first = await invoke(a2, "direct_ask", { recipientId: one.agentId, text: "Synthetic first question" });
   await waitForValue(async () => (await invoke(a1, "inbox_list")).some(item => item.id === first.id), "First direct delivery");
   await invoke(a1, "direct_reply", { recipientId: two.agentId, threadId: first.threadId, replyTo: first.id, text: "<img src=x> A second synthetic message" });
@@ -31,6 +33,12 @@ export async function prepareSyntheticScenario({ a1, a2, b3, invoke, waitForValu
   const question = await invoke(a2, "group_ask", { groupId, text: "Synthetic private group question" });
   await waitForValue(async () => (await invoke(a1, "group_read", { groupId })).some(item => item.id === question.id), "Group delivery");
   await invoke(a1, "group_reply", { groupId, replyTo: question.messageRef, text: "Synthetic private group reply" });
+  const lateInvite = await invoke(a1, "group_invite", { groupId, target: three.agentId });
+  const lateConsent = await invoke(b3, "group_accept", { invite: JSON.stringify(lateInvite) });
+  await invoke(a1, "group_add", { consent: JSON.stringify(lateConsent) });
+  await waitForValue(async () => (await invoke(b3, "group_list")).some(group => group.groupId === groupId && group.status === "active"), "Late group activation");
+  assert.equal((await invoke(b3, "group_read", { groupId })).some(item => item.id === question.id), false,
+    "A late member must not see the group's earlier message.");
   await invoke(b3, "message_send", { recipientId: two.agentId, text: "B3 private history" });
   return { one, two, three, first, second, groupId, question };
 }
@@ -65,4 +73,24 @@ export async function checkPortalRetry({ sender, receiver, receiverId, deviceId,
   } finally {
     await rm(outageFlag, { force: true });
   }
+}
+
+export async function inspectOfflineSyntheticStorage({ sender, receiver, senderId, recipientId, deviceId, groupId,
+  statePaths, invoke, waitForValue, checkStorage }) {
+  await receiver.close();
+  const directText = "Synthetic storage direct marker";
+  const groupText = "Synthetic storage group marker";
+  const offline = await invoke(sender, "message_send", { recipientId, text: directText });
+  const group = await invoke(sender, "group_ask", { groupId, text: groupText });
+  await waitForValue(async () => {
+    const state = JSON.parse(await readFile(statePaths[0], "utf8"));
+    return !Object.values(state.ownerQueue ?? {}).some(item => item.deviceId === deviceId && item.messageId === offline.id);
+  }, "Encrypted storage copy");
+  const [first, second] = await Promise.all(statePaths.map(async path => JSON.parse(await readFile(path, "utf8"))));
+  const routing = { agentId: senderId, deviceId, recipientId, groupId, offlineMessageId: offline.id, groupMessageId: group.id };
+  const messageMarkers = [directText, groupText];
+  const privateKeys = [first.identity.signingSecretKey, first.identity.encryptionSecretKey,
+    second.identity.signingSecretKey, second.identity.encryptionSecretKey];
+  const result = await checkStorage({ ...routing, messageMarkers, privateKeys });
+  return { result, routing, materialDigests: syntheticMaterialDigests(messageMarkers, privateKeys) };
 }
