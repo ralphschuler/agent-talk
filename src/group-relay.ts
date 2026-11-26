@@ -63,14 +63,58 @@ export class GroupDelivery {
     this.sql = ctx.storage.sql;
     this.sql.exec(`
       CREATE TABLE IF NOT EXISTS g_groups (id TEXT PRIMARY KEY, owner TEXT NOT NULL, epoch INTEGER NOT NULL, closed INTEGER NOT NULL, entries INTEGER NOT NULL);
-      CREATE INDEX IF NOT EXISTS g_groups_closed ON g_groups(closed);
-      CREATE INDEX IF NOT EXISTS g_groups_owner ON g_groups(owner,closed);
       CREATE TABLE IF NOT EXISTS g_members (gid TEXT NOT NULL, agent TEXT NOT NULL, leaving INTEGER NOT NULL, PRIMARY KEY(gid,agent));
       CREATE TABLE IF NOT EXISTS g_log (seq INTEGER PRIMARY KEY AUTOINCREMENT, gid TEXT NOT NULL, agent TEXT NOT NULL, opid TEXT NOT NULL, digest TEXT NOT NULL,
         kind TEXT NOT NULL, payload TEXT, welcome TEXT, joiner TEXT, size INTEGER NOT NULL, UNIQUE(agent,opid));
       CREATE INDEX IF NOT EXISTS g_log_group ON g_log(gid);
       CREATE TABLE IF NOT EXISTS g_usage (singleton INTEGER PRIMARY KEY CHECK(singleton=1), bytes INTEGER NOT NULL);
       INSERT OR IGNORE INTO g_usage VALUES (1,0);
+      CREATE TABLE IF NOT EXISTS g_feed (agent TEXT NOT NULL, seq INTEGER NOT NULL, PRIMARY KEY(agent,seq));
+      CREATE INDEX IF NOT EXISTS g_feed_seq ON g_feed(seq);
+      CREATE TABLE IF NOT EXISTS g_clients (agent TEXT PRIMARY KEY, origin TEXT NOT NULL, offered INTEGER NOT NULL, acked INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS g_grants (gid TEXT NOT NULL, id TEXT NOT NULL, signature TEXT NOT NULL, PRIMARY KEY(gid,id));
+      CREATE TABLE IF NOT EXISTS g_wakes (agent TEXT PRIMARY KEY, seq INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS g_migrations (version INTEGER PRIMARY KEY);
+    `);
+    if (!this.sql.exec("SELECT 1 FROM g_migrations WHERE version=1").toArray().length) {
+      ctx.storage.transactionSync(() => {
+        const has = (table: string, name: string) =>
+          this.sql
+            .exec(`PRAGMA table_info(${table})`)
+            .toArray()
+            .some((row) => row.name === name);
+        if (!has("g_groups", "entries"))
+          this.sql.exec("ALTER TABLE g_groups ADD COLUMN entries INTEGER NOT NULL DEFAULT 0");
+        if (!has("g_groups", "closed"))
+          this.sql.exec("ALTER TABLE g_groups ADD COLUMN closed INTEGER NOT NULL DEFAULT 0");
+        if (!has("g_clients", "origin"))
+          this.sql.exec("ALTER TABLE g_clients ADD COLUMN origin TEXT");
+        if (!has("g_log", "kind")) {
+          this.sql.exec("ALTER TABLE g_log ADD COLUMN kind TEXT NOT NULL DEFAULT ''");
+          this.sql.exec(
+            "UPDATE g_log SET kind=COALESCE(json_extract(payload,'$.kind'),'') WHERE payload IS NOT NULL",
+          );
+        }
+        if (!has("g_log", "size"))
+          this.sql.exec("ALTER TABLE g_log ADD COLUMN size INTEGER NOT NULL DEFAULT 0");
+        this.sql.exec(
+          "UPDATE g_groups SET entries=(SELECT COUNT(*) FROM g_log WHERE gid=g_groups.id)",
+        );
+        // Earliest builds stored a close flag but no timestamp. Give those streams the full grace period.
+        this.sql.exec(
+          `UPDATE g_groups SET closed=? WHERE closed=1 OR (closed=0 AND EXISTS
+          (SELECT 1 FROM g_log WHERE gid=g_groups.id AND kind='close'))`,
+          Date.now(),
+        );
+        this.sql.exec(
+          `UPDATE g_log SET size=COALESCE(length(CAST(payload AS BLOB)),0)+COALESCE(length(CAST(welcome AS BLOB)),0)`,
+        );
+        this.sql.exec(
+          "UPDATE g_usage SET bytes=(SELECT COALESCE(SUM(size),0) FROM g_log) WHERE singleton=1",
+        );
+        this.sql.exec(`
+      CREATE INDEX IF NOT EXISTS g_groups_closed ON g_groups(closed);
+      CREATE INDEX IF NOT EXISTS g_groups_owner ON g_groups(owner,closed);
       CREATE TRIGGER IF NOT EXISTS g_charge AFTER INSERT ON g_log BEGIN
         UPDATE g_usage SET bytes=bytes+NEW.size WHERE singleton=1;
       END;
@@ -80,12 +124,18 @@ export class GroupDelivery {
       CREATE TRIGGER IF NOT EXISTS g_release AFTER DELETE ON g_log WHEN OLD.size>0 BEGIN
         UPDATE g_usage SET bytes=bytes-OLD.size WHERE singleton=1;
       END;
-      CREATE TABLE IF NOT EXISTS g_feed (agent TEXT NOT NULL, seq INTEGER NOT NULL, PRIMARY KEY(agent,seq));
-      CREATE INDEX IF NOT EXISTS g_feed_seq ON g_feed(seq);
-      CREATE TABLE IF NOT EXISTS g_clients (agent TEXT PRIMARY KEY, origin TEXT NOT NULL, offered INTEGER NOT NULL, acked INTEGER NOT NULL);
-      CREATE TABLE IF NOT EXISTS g_grants (gid TEXT NOT NULL, id TEXT NOT NULL, signature TEXT NOT NULL, PRIMARY KEY(gid,id));
-      CREATE TABLE IF NOT EXISTS g_wakes (agent TEXT PRIMARY KEY, seq INTEGER NOT NULL);
-    `);
+        `);
+        this.sql.exec("INSERT INTO g_migrations VALUES (1)");
+      });
+    }
+    // An older closed group may have no outstanding notification and no alarm.
+    const [next] = this.sql
+      .exec("SELECT closed FROM g_groups WHERE closed>0 ORDER BY closed LIMIT 1")
+      .toArray();
+    if (next)
+      void ctx.blockConcurrencyWhile(() =>
+        this.scheduleBy(Math.max(Date.now() + 1000, Number(next.closed) + CLOSED_RETENTION)),
+      );
   }
 
   async handle(
@@ -95,7 +145,7 @@ export class GroupDelivery {
     origin: string,
   ): Promise<Response> {
     try {
-      this.checkOrigin(actor, origin);
+      this.checkOrigin(actor, origin, path === "group/sync");
       if (path === "group/sync") return this.sync(actor, Number(body.after));
       if (path === "group/ack") return this.ack(actor, Number(body.through));
       const op = body.op as GroupOp;
@@ -145,13 +195,43 @@ export class GroupDelivery {
     }
   }
 
-  private checkOrigin(actor: string, origin: string) {
+  private checkOrigin(actor: string, origin: string, authenticatedSync = false) {
     const [existing] = this.sql.exec("SELECT origin FROM g_clients WHERE agent=?", actor).toArray();
+    if (!existing) return;
+    if (existing.origin) {
+      requireGroup(
+        existing.origin === origin,
+        403,
+        "Group identity belongs to a different relay origin",
+      );
+      return;
+    }
+    // Historical cursors lacked an origin. Recover the realm from previously authenticated
+    // operations before exposing their feed. Contradictory evidence must fail closed.
+    const realms = this.sql
+      .exec(
+        `WITH relevant(seq) AS (
+      SELECT seq FROM g_feed WHERE agent=? UNION SELECT seq FROM g_log WHERE agent=?
+      UNION SELECT l.seq FROM g_members m JOIN g_log l ON m.gid=l.gid WHERE m.agent=?
+    ) SELECT DISTINCT json_extract(l.payload,'$.relay') AS origin FROM relevant r JOIN g_log l ON l.seq=r.seq
+      WHERE l.payload IS NOT NULL LIMIT 2`,
+        actor,
+        actor,
+        actor,
+      )
+      .toArray();
     requireGroup(
-      !existing || existing.origin === origin,
+      realms.length === 0 || (realms.length === 1 && realms[0].origin === origin),
       403,
-      "Group identity belongs to a different relay origin",
+      "Legacy group identity belongs to a different or ambiguous relay origin",
     );
+    // Another member's submission must never select a legacy recipient's realm for them.
+    requireGroup(
+      realms.length > 0 || authenticatedSync,
+      409,
+      "Legacy group identity must sync to claim its original realm",
+    );
+    this.sql.exec("UPDATE g_clients SET origin=? WHERE agent=? AND origin IS NULL", origin, actor);
   }
 
   private append(op: GroupOp, encoded: string, digest: string, welcome?: string): number {
@@ -206,7 +286,11 @@ export class GroupDelivery {
         op,
         "Pilot group capacity reached",
       );
-      this.sql.exec("INSERT INTO g_groups VALUES (?,?,0,0,0)", op.groupId, op.actor);
+      this.sql.exec(
+        "INSERT INTO g_groups (id,owner,epoch,closed,entries) VALUES (?,?,0,0,0)",
+        op.groupId,
+        op.actor,
+      );
       this.sql.exec("INSERT INTO g_members VALUES (?,?,0)", op.groupId, op.actor);
       recipients = [op.actor];
     } else {
@@ -235,6 +319,7 @@ export class GroupDelivery {
       "Group delivery storage full",
     );
     for (const agent of recipients) {
+      this.checkOrigin(agent, op.relay);
       const n = this.sql.exec("SELECT COUNT(*) AS n FROM g_feed WHERE agent=?", agent).one().n;
       requireCapacity(
         Number(n) < MAX_PENDING_PER_AGENT - reserve,
@@ -261,8 +346,11 @@ export class GroupDelivery {
         .one().seq,
     );
     for (const agent of recipients) {
-      this.checkOrigin(agent, op.relay);
-      this.sql.exec("INSERT OR IGNORE INTO g_clients VALUES (?,?,0,0)", agent, op.relay);
+      this.sql.exec(
+        "INSERT OR IGNORE INTO g_clients (agent,origin,offered,acked) VALUES (?,?,0,0)",
+        agent,
+        op.relay,
+      );
       this.sql.exec("INSERT INTO g_feed VALUES (?,?)", agent, seq);
       this.sql.exec(
         "INSERT INTO g_wakes VALUES (?,?) ON CONFLICT(agent) DO UPDATE SET seq=excluded.seq",

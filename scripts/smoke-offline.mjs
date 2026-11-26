@@ -1,5 +1,6 @@
 // Local stdio regression check. No relay, cloud account or existing profile is required.
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { once } from "node:events";
 import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createServer as createHttpServer } from "node:http";
@@ -7,6 +8,7 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { ElicitRequestSchema } from "@modelcontextprotocol/sdk/types.js";
@@ -20,6 +22,14 @@ await new Promise((resolve, reject) => reservation.once("error", reject).listen(
 const relay = "http://127.0.0.1:" + reservation.address().port;
 await new Promise((resolve, reject) => reservation.close(error => error ? reject(error) : resolve()));
 
+async function checkStartupRefusal(statePath, reason) {
+  // A generic connection timeout does not prove that the permission check rejected the profile.
+  const invocation = promisify(execFile)(process.execPath, [
+    "--import", "tsx", "adapter/mcp-adapter.ts", "--relay", relay, "--state", statePath,
+  ], { cwd: checkout, timeout: 30_000, maxBuffer: 32_768 });
+  await assert.rejects(invocation, error => error.code === 1 && reason.test(error.stderr));
+}
+
 async function withAdapter(name, inspect) {
   const statePath = join(directory, name + ".json");
   const client = new Client({ name: "offline-smoke", version: "1" }, { capabilities: { elicitation: { form: {} } } });
@@ -28,7 +38,7 @@ async function withAdapter(name, inspect) {
   });
   client.setRequestHandler(ElicitRequestSchema, async () => ({ action: "accept", content: { approve: true } }));
   try {
-    await client.connect(transport, { timeout: 5000 });
+    await client.connect(transport, { timeout: 30_000 });
     const call = async (name, args = {}) => {
       const result = await client.callTool({ name, arguments: args });
       if (result.isError) throw new Error(result.content[0].text);
@@ -59,7 +69,7 @@ async function checkRegistrationRecovery(recipientId) {
   });
   const sockets = new WebSocketServer({ server, path: "/v1/socket" });
   // Keep a working socket open while the test forgets the stored registration.
-  const connected = once(sockets, "connection", { signal: AbortSignal.timeout(10000) });
+  const connected = once(sockets, "connection", { signal: AbortSignal.timeout(30_000) });
   server.listen(Number(new URL(relay).port), "127.0.0.1");
   try {
     await once(server, "listening");
@@ -90,7 +100,7 @@ try {
   const shared = join(directory, "shared");
   await mkdir(shared);
   await chmod(shared, 0o755);
-  await assert.rejects(withAdapter("shared/owner", () => assert.fail("unexpected connection")), /closed|disconnect/i);
+  await checkStartupRefusal(join(shared, "owner.json"), /private, owner-only profile directory/);
   await assert.rejects(stat(join(shared, "owner.json")), { code: "ENOENT" });
   const invite = await withAdapter("peer", call => call("profile_export_invite", { displayName: "Offline peer" }));
   const ownerId = await withAdapter("owner", async call => {
@@ -105,7 +115,7 @@ try {
   const path = join(directory, "owner.json");
   for (const privateFile of [path, path + ".lock"]) assert.equal((await stat(privateFile)).mode & 0o777, 0o600);
   await chmod(path, 0o640);
-  await assert.rejects(withAdapter("owner", () => assert.fail("unexpected connection")), /closed|disconnect/i);
+  await checkStartupRefusal(path, /private, owner-only regular files/);
   await chmod(path, 0o600);
   const stored = JSON.parse(await readFile(path, "utf8"));
   assert.deepEqual(stored.consumedInviteIds, {});

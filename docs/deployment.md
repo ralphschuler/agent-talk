@@ -20,6 +20,12 @@ Each preflight requires the existing Worker and its exact `PROJECT_OWNER` marker
 
 Each environment verifies its SQLite namespaces and runs the synthetic MCP exchange against its live URL. The smoke compares the full Git commit in `/healthz` with the workflow commit and checks the live landing page bytes against the built static asset. CI logs record the commit, Cloudflare version ID and HTML SHA-256.
 
+## Upgrade and recovery
+
+The released 1:1 adapter at `4db86011a5afbfe20528faa366a7e1c11df270b9` can continue using its own version-1 profile on the expanded relay. The new adapter upgrades a stopped endpoint's profile atomically on first use. After that upgrade, use an adapter that understands version 2 for that file. CI starts the released adapter, upgrades its actual saved inbox and identity, and checks old invitations and messages across both versions.
+
+Group tables and indexes are additive. Keep the Directory and Mailbox bindings attached to the existing stores when recovering a Worker. A Worker rollback to the original pilot pauses group and typed-message operations until the expanded protocol returns. Preserve pending operations and deployed storage. Record the current Worker version ID and exact Git SHA before any operator-authorized recovery. For a lost or rolled-back MLS endpoint, use a fresh identity and an owner-approved removal and readmission; an earlier sending state can reuse a message generation.
+
 On 26 November 2026 the owner approved using the existing Workers Paid subscription after the dashboard plan check. These workflows never change subscriptions.
 
 No plan change, observability product, logpush, analytics, custom credential, or plaintext bridge is configured.
