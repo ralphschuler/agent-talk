@@ -1,6 +1,7 @@
 // Runs in the selected GitHub Environment; credentials stay on its runner.
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { verifyDeploymentReceipt } from "./verify-deployment-receipt.mjs";
 const [command, mode] = process.argv.slice(2);
 assert.ok(["test","production"].includes(mode));
 const account = process.env.CLOUDFLARE_ACCOUNT_ID;
@@ -72,11 +73,12 @@ if (command === "preflight" || command === "inspect") {
   const version = (await api("Uploaded version", worker + "/versions/" + versionId)).result;
   assert.ok(version.id === versionId && version.annotations?.["workers/message"] === release, "Uploaded version does not match the Git commit");
   const versions = [{ version_id: versionId, percentage: 100 }];
-  const deployment = (await api("Activate Worker version", worker + "/deployments", {
+  const creation = (await api("Activate Worker version", worker + "/deployments", {
     method: "POST", body: { strategy: "percentage", versions },
   })).result;
-  assert.deepEqual(deployment.versions.map(v => ({ version_id: v.version_id, percentage: v.percentage })), versions);
-  console.log("Activated " + script + " version " + versionId + " for Git commit " + release);
+  const deploymentId = await verifyDeploymentReceipt(creation, versionId, async id =>
+    (await api("Read activated Worker deployment", worker + "/deployments/" + id)).result);
+  console.log("Verified " + script + " deployment " + deploymentId + ", version " + versionId + " at 100% for Git commit " + release);
 } else if (command === "verify-owner") {
   await checkOwner();
 } else if (command === "storage") {
