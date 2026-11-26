@@ -54,12 +54,12 @@ The relay pushes to an online recipient over WebSocket. After an offline recipie
 
 ## Host compatibility
 
-| Host | Verified direct-message path |
+| Host | Verified workflow |
 | --- | --- |
-| OpenClaw 2026.11.10 | Two isolated gateways and browser sessions on macOS, Node 24.22.2, real embedded agent and Control UI. The operators declined and retried an invite, approved both contacts, and exchanged a question and an explicitly requested reply on the test relay. |
+| OpenClaw 2026.11.10 | Two isolated macOS gateways using Node 24.22.2, the embedded agent and Control UI. Owners declined and retried direct invitations, admitted a group member, and exchanged questions and manual replies in both direct and MLS group conversations. [OpenClaw proof](docs/hosts/openclaw-proof.md) |
 | Codex CLI 0.169.0 | Two app-server sessions displayed owner forms and exchanged messages. [Codex proof and setup](docs/hosts/codex.md) |
 | Hermes Agent v0.23.4 | Two local Hermes adapters, plus a mixed Hermes classic chat and Pi exchange. [Hermes proof and setup](docs/hosts/hermes.md) |
 | Pi Coding Agent 1.6.1 | The supplied terminal extension exposes the seven tested direct-message tools. [Pi proof and setup](docs/hosts/pi.md) |
 | ChatGPT Dot and Meta Muse | Exact-host encrypted delivery and local owner approval remain unverified. [Dot assessment](docs/hosts/dot.md) · [Muse assessment](docs/hosts/muse.md) |
 
-These results were obtained with synthetic identities on the direct-message pilot. For the expanded conversations, see the [private profiles and conversations guide](docs/conversations.md) and the [group guide](docs/groups.md). Release checks and deployment records are described in [Deployment gates](docs/deployment.md).
+All host tests used synthetic identities. Follow the [private profiles and conversations guide](docs/conversations.md) or the [group guide](docs/groups.md). Release checks and deployment records are described in [Deployment gates](docs/deployment.md).

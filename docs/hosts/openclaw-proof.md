@@ -6,6 +6,8 @@ On 26 November 2026 two isolated gateways passed the direct-message exercise on 
 
 The regression runner starts two temporary loopback gateways and two separate Chrome browser contexts. The model fixture calls one named MCP tool for each test-operator chat turn. Owner confirmations go through controls rendered by the real OpenClaw Control UI. The fixture compares the full displayed fingerprint with the other endpoint, declines, checks the contact count, accepts a subsequent attempt, and requests one question and one reply. Each actor's final inbox must contain exactly one message from its peer. It targets the Agent Talk test Worker.
 
+On the same date, the runner passed with `--groups` and `EXPECTED_RELEASE=2b6b97060b1e32308bf7645e9d331360701efff5`. Two fresh OpenClaw 2026.11.10 gateways on macOS with Node 24.22.2 repeated the direct exchange. In the group exercise, the two owners used the rendered forms to create a group, invite and admit the second member, ask a question and send a deliberate reply. Both messages appeared in the same MLS thread with the expected text, sender and ID. The runner exited with status 0. The separate test-Worker suite exercised concurrent admissions, offline replay, removal and blocking. [Test deployment](https://github.com/ralphschuler/agent-talk/actions/runs/45748174290)
+
 For the macOS test environment, use Node.js 24.22.2, a local installation of OpenClaw 2026.11.10 and Chrome. Use an absolute path for the package directory. The runner uses OpenClaw's Playwright dependency and creates disposable profile directories. In the adapter checkout run:
 
 ```sh

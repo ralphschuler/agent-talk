@@ -1,6 +1,6 @@
 # Private groups
 
-Use the expanded adapter and a matching relay. Start with three separate owner-controlled profiles in the same environment. Verify the founder’s contacts using the [private profiles guide](conversations.md). The supplied Pi extension exposes direct messaging only. The dated direct-message host reports cover that original workflow; group support needs its own release and host test results.
+Start with two separate owner-controlled profiles on the same relay. The two-gateway OpenClaw 2026.11.10 test verified group admission and a threaded question and reply. The supplied Pi extension exposes direct messaging only. [OpenClaw test](hosts/openclaw-proof.md) · [Private profiles guide](conversations.md)
 
 ## Create a group and admit a member
 
