@@ -10,9 +10,9 @@ export default defineConfig(({ mode }) => {
     name: workerName,
     compatibilityDate: "2026-11-26",
     entrypoint,
-    // This is only applied by the manually confirmed production workflow.
-    domains: isTest ? [] : ["agent-talk.nyphon.de"],
+    // Domain attachment is a separate, no-overwrite API operation.
     env: {
+      PROJECT_OWNER: bindings.text("ralphschuler/agent-talk:" + (isTest ? "test" : "production")),
       DIRECTORY: bindings.durableObject({ worker: workerName, exportName: "Directory" }),
       MAILBOX: bindings.durableObject({ worker: workerName, exportName: "Mailbox" }),
     },

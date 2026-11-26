@@ -12,7 +12,8 @@
     "test": "vp test",
     "typecheck": "cf workers types && tsc --noEmit",
     "typecheck:adapter": "tsc --ignoreConfig --noEmit --target es2024 --module preserve --moduleResolution bundler --types node --skipLibCheck --allowImportingTsExtensions adapter/mcp-adapter.ts",
-    "mcp": "tsx src/mcp-adapter.ts"
+    "mcp": "node --import tsx adapter/mcp-adapter.ts",
+    "smoke:mcp": "node scripts/smoke-mcp.mjs"
   },
   "dependencies": {
     "@hpke/chacha20poly1305": "1.8.1",

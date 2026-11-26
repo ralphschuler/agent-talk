@@ -1,4 +1,4 @@
-import { SELF } from "cloudflare:test";
+import { SELF, env, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { expect, it } from "vite-plus/test";
 import { createLocalIdentity, sealEnvelope, signInvite, signRequest } from "../src/crypto.ts";
 import type { LocalIdentity } from "../src/crypto.ts";
@@ -83,10 +83,62 @@ it("uses the Worker entrypoint to reject unconfirmed, then blocked, senders", as
 
   const envelope = await sealEnvelope(alice, bob, "live-1", "Ist die Dev-Vorschau bereit zum Review?");
   expect((await signedPost("/v1/send", alice, "send", { envelope })).status).toBe(201);
+  const mailbox = env.MAILBOX.getByName(bob.agentId);
+  const stored = await runInDurableObject(mailbox, (_, state) => state.storage.sql.exec("SELECT * FROM queue").toArray());
+  expect(stored).toHaveLength(1);
+  expect(JSON.parse(String(stored[0].envelope))).toEqual(envelope);
+  const dir = env.DIRECTORY.getByName("directory");
+  const registry = await runInDurableObject(dir, (_, state) => ["identities", "approvals", "blocks", "consumed_invites", "admissions"].map(table =>
+    state.storage.sql.exec("SELECT * FROM " + table).toArray()));
+  const dump = JSON.stringify([stored, registry]);
+  for (const value of [alice.signingSecretKey, bob.signingSecretKey, alice.encryptionSecretKey, bob.encryptionSecretKey, "Ist die Dev-Vorschau bereit zum Review?"]) {
+    expect(dump.includes(value)).toBe(false);
+  }
 
   expect((await signedPost("/v1/contact/block", bob, "contact/block", { peerId: alice.agentId })).status).toBe(200);
+  expect(await runInDurableObject(mailbox, (_, state) => state.storage.sql.exec("SELECT COUNT(*) AS n FROM queue").one().n)).toBe(0);
   const afterBlock = await sealEnvelope(alice, bob, "blocked-1", "still opaque");
   expect((await signedPost("/v1/send", alice, "send", { envelope: afterBlock })).status).toBe(403);
+});
+
+it("consumes an expiring invite for exactly one recipient and requires reciprocal consent", async () => {
+  const [alice, bob, charlie] = await Promise.all(Array.from({ length: 3 }, () => createLocalIdentity()));
+  await Promise.all([register(alice), register(bob), register(charlie)]);
+  const ticket = await invite(alice, "once");
+  const accept = (identity: LocalIdentity, invitation: Invite) =>
+    signedPost("/v1/contact/approve", identity, "contact/approve", { invite: invitation });
+  expect((await accept(bob, ticket)).status).toBe(200);
+  expect((await accept(charlie, ticket)).status).toBe(409);
+  const outgoing = await sealEnvelope(bob, alice, "one-way", "Waiting for owner approval");
+  expect((await signedPost("/v1/send", bob, "send", { envelope: outgoing })).status).toBe(403);
+  const { signature, ...unsigned } = ticket;
+  expect((await accept(charlie, await signInvite(alice, { ...unsigned, inviteId: "expired", expiresAt: Date.now() - 60_000 }))).status).toBe(400);
+});
+
+it("enforces bounded offline retention and independent sender IDs in the same mailbox", async () => {
+  const [alice, bob, charlie] = await Promise.all(Array.from({ length: 3 }, () => createLocalIdentity()));
+  await Promise.all([register(alice), register(bob), register(charlie)]);
+  await mutuallyApprove(alice, bob, "capacity-a");
+  await mutuallyApprove(charlie, bob, "capacity-c");
+  const twinnedId = "same-message-id";
+  for (const sender of [alice, charlie]) {
+    const envelope = await sealEnvelope(sender, bob, twinnedId, "synthetic");
+    expect((await signedPost("/v1/send", sender, "send", { envelope })).status).toBe(201);
+  }
+  const box = env.MAILBOX.getByName(bob.agentId);
+  // Seed the remaining occupancy in DO storage; assert admission through the public entry point.
+  await runInDurableObject(box, (_, state) => {
+    const sql = state.storage.sql;
+    for (let i = 0; i < 62; i++) sql.exec("INSERT INTO queue VALUES (?, ?, ?, ?)", "fixture", "fixture-" + i, "{}", Date.now());
+  });
+  const last = await sealEnvelope(alice, bob, "last", "synthetic");
+  expect((await signedPost("/v1/send", alice, "send", { envelope: last })).status).toBe(429);
+  await runInDurableObject(box, (_, state) => {
+    state.storage.sql.exec("UPDATE queue SET received=0 WHERE sender='fixture'");
+  });
+  expect(await runDurableObjectAlarm(box)).toBe(true);
+  expect(await runInDurableObject(box, (_, state) => state.storage.sql.exec("SELECT COUNT(*) AS n FROM queue").one().n)).toBe(2);
+  expect((await signedPost("/v1/send", alice, "send", { envelope: last })).status).toBe(201);
 });
 
 it("pushes live and safely replays after local persistence but before ACK", async () => {
@@ -103,7 +155,7 @@ it("pushes live and safely replays after local persistence but before ACK", asyn
   const live = await livePush;
   expect(live.envelope.id).toBe(liveEnvelope.id);
   expect(live.envelope.ciphertext).not.toContain("Dev-Vorschau");
-  liveSocket.send(JSON.stringify({ type: "ack", id: liveEnvelope.id }));
+  liveSocket.send(JSON.stringify({ type: "ack", senderId: alice.agentId, id: liveEnvelope.id }));
   liveSocket.close(1000, "done");
 
   // Simulate the critical crash window: durable local display happens, then no ACK is sent.
@@ -124,7 +176,7 @@ it("pushes live and safely replays after local persistence but before ACK", asyn
   secondSocket.send(JSON.stringify({ type: "resume" }));
   const replayed = await secondReplay;
   if (!seen.has(`${alice.agentId}:${replayed.envelope.id}`)) visibleInboxEntries += 1;
-  secondSocket.send(JSON.stringify({ type: "ack", id: replayed.envelope.id }));
+  secondSocket.send(JSON.stringify({ type: "ack", senderId: alice.agentId, id: replayed.envelope.id }));
   secondSocket.close(1000, "acknowledged after replay");
 
   expect(replayed.envelope.id).toBe(offlineEnvelope.id);

@@ -12,8 +12,10 @@ Set these **GitHub Environment secrets** in both environments; do not commit the
 - `CLOUDFLARE_API_TOKEN`
 - `CLOUDFLARE_ACCOUNT_ID`
 
-The API token is scoped to the target account with **Workers Scripts: Edit**. The production environment additionally needs **DNS: Edit** and **Workers Routes: Edit** for zone `nyphon.de`, because it may bind the new custom domain. The production workflow first queries the exact DNS name and stops if any record already exists. It never updates or deletes an existing record.
+Use a token scoped to the target account with authority to create or update these Workers and their SQLite namespaces. The production check reads the active zone, its exact DNS name and its Workers domain assignments. Grant Zone Read, DNS Read and the required Workers domain management permission for this zone. The domain attachment explicitly disables replacing an origin, overriding DNS records and replacing the domain set.
 
-`Deploy test` runs checks, deploys only `agent-talk-test`, then must be smoke-tested at its Workers URL. `Deploy production` is manual and requires its `DEPLOY_PRODUCTION` confirmation input. It runs the same checks, refuses a DNS collision, and then binds only `agent-talk.nyphon.de`.
+Both deployments are manual. Test requires a successful Verify run on the same commit and runs the synthetic MCP smoke against its Workers URL. Production requires a successful test deployment and smoke on the same commit as well as its `DEPLOY_PRODUCTION` confirmation. It checks domain ownership before upload, checks again when binding the hostname, verifies distinct SQLite namespaces, and exercises the production hostname through MCP.
+
+On 26 November 2026 the owner approved using the existing Workers Paid subscription after the dashboard plan check. These workflows never change subscriptions.
 
 No plan change, observability product, logpush, analytics, custom credential, or plaintext bridge is configured.

@@ -10,6 +10,7 @@ it("uses authenticated HPKE with the pinned sender key", async () => {
 
   await expect(openEnvelope(bob, alice, envelope)).resolves.toBe("Ist die Dev-Vorschau bereit zum Review?");
   await expect(openEnvelope(bob, mallory, envelope)).rejects.toThrow();
+  await expect(openEnvelope(bob, { ...alice, encryptionPublicKey: mallory.encryptionPublicKey }, envelope)).rejects.toThrow();
   // Change a significant leading base64url character; changing the final one can
   // only touch unused padding bits for some ciphertext lengths.
   const alteredFirstCharacter = envelope.ciphertext.startsWith("A") ? "B" : "A";

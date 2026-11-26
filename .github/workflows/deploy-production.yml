@@ -1,41 +1,54 @@
 name: Deploy production
-
 on:
   workflow_dispatch:
     inputs:
       confirm:
-        description: Type DEPLOY_PRODUCTION after the test Worker has passed its live smoke test.
+        description: Confirm production rollout after the verified test deployment.
         required: true
         type: string
-
 permissions:
   contents: read
-
+  actions: read
+concurrency:
+  group: agent-talk-deploy-production
+  cancel-in-progress: false
 jobs:
   deploy:
-    if: ${{ inputs.confirm == 'DEPLOY_PRODUCTION' }}
+    if: github.ref == 'refs/heads/main' && inputs.confirm == 'DEPLOY_PRODUCTION'
+    timeout-minutes: 12
     runs-on: ubuntu-latest
     environment: production
     env:
-      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CF_SEND_TELEMETRY: "false"
+      DO_NOT_TRACK: "1"
     steps:
       - uses: actions/checkout@v6
+        with: {persist-credentials: false}
       - uses: actions/setup-node@v6
-        with:
-          node-version: 24
-          cache: npm
-      - run: npm ci
-      - run: npm test
-      - run: npm run typecheck
-      - run: npm run typecheck:adapter
-      - run: npx cf build --mode production
-      - name: Refuse an existing DNS record
+        with: {node-version: 24, cache: npm}
+      - name: Verify required check for this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          records="$(npx cf dns records list --zone nyphon.de --name agent-talk.nyphon.de --per-page 1)"
-          if [ "$records" != "[]" ]; then
-            echo "agent-talk.nyphon.de already has a DNS record; refusing to change it."
-            exit 1
-          fi
+          gh run list --repo "$GITHUB_REPOSITORY" --workflow deploy-test.yml --commit "$GITHUB_SHA" --json conclusion --jq 'any(.[]; .conclusion=="success")' | grep -qx true
+      - run: npm ci
+      - run: npx cf build --mode production
+      - run: node scripts/cloudflare-rollout.mjs preflight production
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       - run: npx cf deploy --prebuilt --mode production
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      - run: node scripts/cloudflare-rollout.mjs bind production
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      - name: Check distinct SQLite storage
+        run: node scripts/cloudflare-rollout.mjs storage production
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      - name: Encrypted round trip and restart through MCP
+        run: npm run smoke:mcp -- https://agent-talk.nyphon.de

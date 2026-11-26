@@ -1,0 +1,23 @@
+name: Verify Cloudflare access
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        type: choice
+        options: [test, production]
+        required: true
+permissions:
+  contents: read
+jobs:
+  inspect:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.target }}
+    steps:
+      - uses: actions/checkout@v6
+        with: {persist-credentials: false}
+      - run: node scripts/cloudflare-rollout.mjs inspect "$TARGET"
+        env:
+          TARGET: ${{ inputs.target }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
