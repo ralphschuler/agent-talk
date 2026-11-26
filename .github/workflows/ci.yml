@@ -34,6 +34,7 @@ jobs:
       - run: node scripts/test-owner-live-gate.mjs
       - run: node scripts/test-owner-live-storage.mjs
       - run: node scripts/test-owner-live-human-signin.mjs
+      - run: node scripts/test-owner-live-e2e.mjs
       - name: Verify owner portal and real local MCP clients
         run: |
           npm run dev > "$RUNNER_TEMP/agent-talk-relay.log" 2>&1 &
@@ -44,4 +45,5 @@ jobs:
             sleep 1
           done
           curl --silent --fail http://localhost:5173/healthz >/dev/null
+          AGENT_TALK_TEST_RELAY=http://localhost:5173 node scripts/test-owner-live-fixture.mjs
           AGENT_TALK_TEST_RELAY=http://localhost:5173 AGENT_TALK_CHROME="$(command -v google-chrome)" node --import tsx scripts/test-portal-session.mjs

@@ -154,7 +154,7 @@ async function browserSmoke(sessionCookie, agentId, expectEmpty = false, multiAg
     await call("Page.navigate", { url: localPortal + "/" });
     await waitFor('document.querySelector("#status")?.textContent?.startsWith("Signed in")');
     await runOwnerBrowserScenario({ evaluate, waitFor, portalOrigin: localPortal, agentId,
-      senderId: sender.agentId, mcp, secondMcp, expectEmpty, multiAgent, secondAccountId: "67890",
+      senderId: sender.agentId, mcp, secondMcp, expectEmpty, multiAgent, firstAccountId: "12345", secondAccountId: "67890",
       setApproval: async approved => { ownerApproved = approved; },
       delayRead: async id => { delayedAgentId = id; },
       revokeFirst: async id => evaluate('window.confirm = () => true; Array.from(document.querySelectorAll("#agents button")).find(b => b.textContent === ' + JSON.stringify(id) + ').nextElementSibling.click()'),

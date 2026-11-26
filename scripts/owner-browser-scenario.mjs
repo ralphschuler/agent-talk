@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 
 export async function runOwnerBrowserScenario({ evaluate, waitFor, portalOrigin, agentId,
-  senderId, mcp, secondMcp, expectEmpty = false, multiAgent, secondAccountId,
+  senderId, mcp, secondMcp, expectEmpty = false, multiAgent, firstAccountId, secondAccountId,
   setApproval, delayRead, revokeFirst, signInSecond,
   firstThreadId = "synthetic-thread", firstMessageId = "synthetic-message" }) {
   if (expectEmpty) {
@@ -18,6 +18,8 @@ export async function runOwnerBrowserScenario({ evaluate, waitFor, portalOrigin,
   await evaluate('document.querySelector("#start-pairing").click()');
   await waitFor('document.querySelector("#pair-request")?.value?.length > 0');
   const request = JSON.parse(await evaluate('document.querySelector("#pair-request").value'));
+  assert.equal(request.agentId, agentId);
+  assert.equal(request.accountId, firstAccountId);
   await setApproval(true);
   const signed = await mcp.callTool({ name: "owner_device_approve", arguments: { request } });
   assert.notEqual(signed.isError, true);
@@ -61,6 +63,8 @@ export async function runOwnerBrowserScenario({ evaluate, waitFor, portalOrigin,
     await evaluate('document.querySelector("#start-pairing").click()');
     await waitFor('JSON.parse(document.querySelector("#pair-request").value).agentId === ' + JSON.stringify(multiAgent.secondAgentId));
     const secondRequest = JSON.parse(await evaluate('document.querySelector("#pair-request").value'));
+    assert.equal(secondRequest.agentId, multiAgent.secondAgentId);
+    assert.equal(secondRequest.accountId, firstAccountId);
     const secondSigned = await secondMcp.callTool({ name: "owner_device_approve", arguments: { request: secondRequest } });
     assert.notEqual(secondSigned.isError, true);
     await evaluate('document.querySelector("#pair-approval").value = ' + JSON.stringify(secondSigned.content[0].text));
