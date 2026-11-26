@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { checkLiveStorage, syntheticMaterialDigests } from "./owner-live-storage-check.mjs";
+import { checkLiveStorage, syntheticMaterialDigests, verifyStagingWindow } from "./owner-live-storage-check.mjs";
 
 const syntheticMarker = "synthetic message never sent to the API";
 const syntheticKeys = [1, 2, 3, 4].map(value => createHash("sha256").update("synthetic-key-" + value).digest("base64url"));
@@ -100,4 +100,20 @@ await assert.rejects(checkLiveStorage({ ...input, fetcher: fakeFetch("binary-key
 await assert.rejects(checkLiveStorage({ ...input, fetcher: fakeFetch("wrong-version") }), /expected commit/);
 await assert.rejects(checkLiveStorage({ ...input, fetcher: fakeFetch("deployment-changed") }), /deployment changed/);
 await assert.rejects(checkLiveStorage({ ...input, fetcher: fakeFetch("split") }), /one complete version/);
+const window = { account: input.account, token: input.token, release: input.release, expectedDeployment,
+  startedAt: "2026-11-26T00:00:10.000Z", observedAt: "2026-11-26T00:00:20.000Z", now: Date.parse("2026-11-26T00:00:30.000Z") };
+assert.deepEqual(await verifyStagingWindow({ ...window, fetcher: fakeFetch("safe") }), expectedDeployment);
+await assert.rejects(verifyStagingWindow({ ...window, startedAt: "2026-11-25T23:59:59.000Z", fetcher: fakeFetch("safe") }), /redeployed/);
+await assert.rejects(verifyStagingWindow({ ...window, expectedDeployment: { ...expectedDeployment,
+  versionId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd" }, fetcher: fakeFetch("safe") }), /does not match/);
+const underlying = fakeFetch("safe");
+const rolledBack = async (url, options) => {
+  if (new URL(url).pathname.endsWith("/deployments")) return Response.json({ success: true, result: { deployments: [
+    { id: expectedDeployment.deploymentId, created_on: "2026-11-26T00:00:18.000Z", versions: [{ version_id: expectedDeployment.versionId, percentage: 100 }] },
+    { id: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee", created_on: "2026-11-26T00:00:15.000Z", versions: [{ version_id: "ffffffff-ffff-4fff-8fff-ffffffffffff", percentage: 100 }] },
+    { id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", created_on: "2026-11-26T00:00:00.000Z", versions: [{ version_id: expectedDeployment.versionId, percentage: 100 }] },
+  ] }, result_info: { total_pages: 1 } });
+  return underlying(url, options);
+};
+await assert.rejects(verifyStagingWindow({ ...window, fetcher: rolledBack }), /redeployed/);
 console.log("Live storage checker uses scoped read-only queries and fails on missing or plaintext rows.");

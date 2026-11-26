@@ -105,6 +105,37 @@ export async function getStagingDeployment({ account, token, release, fetcher = 
   return activeDeployment();
 }
 
+// Verify the complete interactive interval, including changes later rolled back.
+export async function verifyStagingWindow({ account, token, release, expectedDeployment, startedAt, observedAt, now = Date.now(), fetcher = fetch }) {
+  const start = Date.parse(startedAt);
+  const end = Date.parse(observedAt);
+  assert.ok(Number.isFinite(start) && Number.isFinite(end) && start <= end && end <= now && end - start <= 2 * 60 * 60_000,
+    "Invalid staging observation window.");
+  const current = await getStagingDeployment({ account, token, release, fetcher });
+  assert.deepEqual(current, expectedDeployment, "Staging deployment does not match the observation.");
+  const deployments = [];
+  for (let page = 1; page <= 100; page++) {
+    const response = await fetcher(API + account + "/workers/scripts/agent-talk-owner-test/deployments?per_page=100&page=" + page,
+      { redirect: "error", headers: { authorization: "Bearer " + token, "content-type": "application/json" }, signal: AbortSignal.timeout(20_000) });
+    assert.ok(response.ok, "Staging deployment history is unavailable.");
+    const data = await response.json();
+    assert.equal(data.success, true);
+    assert.ok(Array.isArray(data.result?.deployments));
+    deployments.push(...data.result.deployments);
+    if (page >= (data.result_info?.total_pages ?? 1)) break;
+    assert.ok(page < 100, "Staging deployment history is too large to verify.");
+  }
+  assert.ok(deployments.length && deployments.every(item => Number.isFinite(Date.parse(item.created_on))), "Invalid staging deployment history.");
+  deployments.sort((a, b) => Date.parse(b.created_on) - Date.parse(a.created_on));
+  const sinceStart = deployments.filter(item => Date.parse(item.created_on) > start);
+  assert.equal(sinceStart.length, 0, "Staging was redeployed during or after the interactive scenario.");
+  const before = deployments[0];
+  assert.ok(before && before.id === expectedDeployment.deploymentId && before.versions?.length === 1 &&
+    before.versions[0].version_id === expectedDeployment.versionId && before.versions[0].percentage === 100,
+  "The observed staging deployment was not active at the start.");
+  return current;
+}
+
 export async function checkLiveStorage({ account, token, release, agentId, deviceId, recipientId, groupId,
   offlineMessageId, groupMessageId, messageMarkers, privateKeys, materialDigests, expectedDeployment, fetcher = fetch }) {
   assert.ok(typeof account === "string" && /^[a-f0-9]{32}$/i.test(account), "Invalid Cloudflare account ID.");

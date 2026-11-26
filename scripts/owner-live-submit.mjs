@@ -9,7 +9,7 @@ try {
   const data = await readFile(process.argv[2]);
   assert.ok(data.length > 0 && data.length <= 24_000, "Invalid observation size.");
   const record = JSON.parse(data.toString("utf8"));
-  assert.equal(record.schema, "agent-talk-staging-observation-v1");
+  assert.equal(record.schema, "agent-talk-staging-observation-v2");
   assert.equal(record.mode, "staging-interactive", "Local fixture records cannot be submitted.");
   assert.equal(record.productionApproval, false);
   const head = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();

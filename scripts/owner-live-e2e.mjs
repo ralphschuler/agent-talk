@@ -14,7 +14,6 @@ import { getDefaultEnvironment, StdioClientTransport } from "@modelcontextprotoc
 import { ElicitRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { waitForHumanSignIn } from "./owner-live-human-signin.mjs";
 import { runOwnerBrowserScenario } from "./owner-browser-scenario.mjs";
-import { checkLiveStorage, getStagingDeployment } from "./owner-live-storage-check.mjs";
 import { writeSanitizedObservation } from "./owner-live-record.mjs";
 
 const portal = "https://agent-talk-owner-test.ralph-cfd.workers.dev";
@@ -41,11 +40,11 @@ async function waitForValue(fn, description) {
 
 async function main() {
   const settings = liveSettings(process.env, process.stdin.isTTY && process.stdout.isTTY);
-  const account = process.env.CLOUDFLARE_ACCOUNT_ID;
-  const token = process.env.CLOUDFLARE_API_TOKEN;
   const evidencePath = process.env.OWNER_LIVE_EVIDENCE_PATH;
-  assert.match(account ?? "", /^[a-f0-9]{32}$/i, "Cloudflare account ID is unavailable.");
-  assert.ok(token, "Cloudflare API token is unavailable.");
+  const expectedDeployment = { deploymentId: process.env.OWNER_LIVE_DEPLOYMENT_ID, versionId: process.env.OWNER_LIVE_VERSION_ID };
+  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  assert.ok(uuid.test(expectedDeployment.deploymentId ?? "") || /^[a-f0-9]{32}$/i.test(expectedDeployment.deploymentId ?? ""), "Set the staging deployment ID from the preflight.");
+  assert.match(expectedDeployment.versionId ?? "", uuid, "Set the staging version ID from the preflight.");
   assert.ok(evidencePath, "Set OWNER_LIVE_EVIDENCE_PATH to a new local output file.");
   try { await lstat(evidencePath); throw new Error("The evidence output already exists."); }
   catch (error) { if (error.code !== "ENOENT") throw error; }
@@ -57,8 +56,8 @@ async function main() {
     const health = await fetch(portal + "/healthz", { redirect: "error", signal: AbortSignal.timeout(20_000) });
     assert.ok(health.ok && (await health.json()).release === settings.release, "The expected staging commit is not live.");
   };
+  const startedAt = new Date().toISOString();
   await checkRelease();
-  const expectedDeployment = await getStagingDeployment({ account, token, release: settings.release });
   const requireHost = createRequire(join(resolve(process.env.OPENCLAW_PACKAGE_DIR), "package.json"));
   assert.equal(requireHost("./package.json").version, "2026.11.10", "Use the verified OpenClaw version.");
   const { chromium } = requireHost("playwright-core");
@@ -148,8 +147,7 @@ async function main() {
       inspectStorage: async deviceId => {
         storageObservation = await inspectOfflineSyntheticStorage({ sender: a1, receiver: b3, senderId: one.agentId,
           recipientId: three.agentId, deviceId, groupId, statePaths: [join(dir, "a1.json"), join(dir, "a2.json")],
-          invoke, waitForValue, checkStorage: input => checkLiveStorage({ ...input, account, token,
-            release: settings.release, expectedDeployment }) });
+          invoke, waitForValue, checkStorage: async () => ({ status: "pending" }) });
       },
       delayRead: async target => {
         const handler = async route => {
@@ -177,14 +175,12 @@ async function main() {
       },
     });
     await checkRelease();
-    assert.ok(storageObservation, "The staging storage inspection did not run.");
-    assert.deepEqual(await getStagingDeployment({ account, token, release: settings.release }), expectedDeployment,
-      "The staging deployment changed during the interactive scenario.");
+    assert.equal(storageObservation?.result?.status, "pending", "The synthetic storage probe was not prepared.");
     const identity = JSON.parse(await readFile(join(dir, "a1.json"), "utf8")).identity;
     await writeSanitizedObservation({ path: evidencePath, release: settings.release,
-      deployment: expectedDeployment, storage: storageObservation.result, routing: storageObservation.routing,
+      deployment: expectedDeployment, startedAt, routing: storageObservation.routing,
       materialDigests: storageObservation.materialDigests, signingSecretKey: identity.signingSecretKey });
-    console.log("Interactive staging checks passed and a sanitized local observation was written. Production remains gated.");
+    console.log("Interactive checks passed; sanitized storage lookup is pending protected verification. Production remains gated.");
   } finally {
     if (browser) await browser.close().catch(() => {});
     await Promise.allSettled(clients.reverse().map(client => client.close()));

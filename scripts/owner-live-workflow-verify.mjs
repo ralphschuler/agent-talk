@@ -22,16 +22,19 @@ export function parseObservation({ encoded, expectedHash, release, deploymentId,
   assert.equal(bytes.toString("base64url"), encoded, "Evidence encoding is not canonical.");
   const record = JSON.parse(bytes.toString("utf8"));
   assert.ok(record && Object.getPrototypeOf(record) === Object.prototype);
-  assert.deepEqual(Object.keys(record).sort(), ["deployment", "materialDigests", "mode", "observedAt", "productionApproval", "release", "routing", "schema", "signature", "storage"]);
-  assert.equal(record.schema, "agent-talk-staging-observation-v1");
+  assert.deepEqual(Object.keys(record).sort(), ["deployment", "materialDigests", "mode", "observedAt", "productionApproval", "release", "routing", "schema", "signature", "startedAt", "storage"]);
+  assert.equal(record.schema, "agent-talk-staging-observation-v2");
   assert.equal(record.mode, "staging-interactive", "Offline fixtures cannot authorize production.");
   assert.equal(record.productionApproval, false);
   assert.equal(record.release, release);
   assert.deepEqual(record.deployment, { deploymentId, versionId });
-  assert.deepEqual(record.storage, { ownerRows: 1, mailboxRows: 1, groupRows: 1 });
+  assert.deepEqual(record.storage, { status: "pending" });
   const time = Date.parse(record.observedAt);
   assert.ok(Number.isFinite(time) && new Date(time).toISOString() === record.observedAt && time <= now && now - time <= maxAge,
     "The observation is stale or has a future timestamp.");
+  const started = Date.parse(record.startedAt);
+  assert.ok(Number.isFinite(started) && new Date(started).toISOString() === record.startedAt &&
+    started <= time && time - started <= 2 * 60 * 60_000, "Invalid observation window.");
   const routeNames = ["agentId", "deviceId", "recipientId", "groupId", "offlineMessageId", "groupMessageId"];
   assert.deepEqual(Object.keys(record.routing ?? {}).sort(), [...routeNames].sort());
   for (const name of routeNames.slice(0, 3)) assert.match(record.routing[name], agent);
@@ -65,7 +68,7 @@ export async function verifyObservation({ encoded, expectedHash, release, deploy
   assert.ok(Number.isSafeInteger(runId) && runId > 0 && runAttempt === 1, "Rerun attempts cannot approve evidence.");
   assert.ok(token, "GitHub Actions read token is required.");
   const record = parseObservation({ encoded, expectedHash, release, deploymentId, versionId, now });
-  const time = Date.parse(record.observedAt);
+  const time = Date.parse(record.startedAt);
   async function api(path) {
     const response = await fetcher("https://api.github.com/repos/" + repo + path, { redirect: "error",
       headers: { authorization: "Bearer " + token, accept: "application/vnd.github+json", "user-agent": "agent-talk-live-verifier" },

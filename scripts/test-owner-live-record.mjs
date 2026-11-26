@@ -17,7 +17,7 @@ const routing = { agentId: "at1_" + publicKey, deviceId: "at1_" + "B".repeat(43)
   groupMessageId: "33333333-3333-4333-8333-333333333333", secret: "synthetic-private-key" };
 const materialDigests = syntheticMaterialDigests(["synthetic-private-message", "synthetic group marker"], keys);
 materialDigests[0].secret = "synthetic-private-message";
-const input = { path, mode: "synthetic-fixture", release: "d".repeat(40), deployment, storage, routing, materialDigests, signingSecretKey: keys[0] };
+const input = { path, mode: "synthetic-fixture", release: "d".repeat(40), deployment, startedAt: new Date().toISOString(), routing, materialDigests, signingSecretKey: keys[0] };
 try {
   const result = await writeSanitizedObservation(input);
   const contents = await readFile(path, "utf8");
@@ -29,9 +29,9 @@ try {
   for (const key of keys) assert.ok(!contents.includes(key));
   await assert.rejects(writeSanitizedObservation(input), { code: "EEXIST" });
   await assert.rejects(writeSanitizedObservation({ ...input, path: join(dir, "invalid"), release: "bad" }));
-  await assert.rejects(writeSanitizedObservation({ ...input, path: join(dir, "invalid"), storage: { ...storage, groupRows: 0 } }));
+  await assert.rejects(writeSanitizedObservation({ ...input, path: join(dir, "invalid"), startedAt: "invalid" }));
   await assert.rejects(writeSanitizedObservation({ ...input, path: join(dir, "invalid"), materialDigests: [] }));
-  await assert.rejects(writeSanitizedObservation({ ...input, path: join(dir, "invalid"), deployment: { ...deployment, versionId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd" } }));
+  await assert.rejects(writeSanitizedObservation({ ...input, path: join(dir, "invalid"), deployment: { ...deployment, versionId: "invalid" } }));
   assert.deepEqual(await readdir(dir), ["observation.json"]);
 } finally { await rm(dir, { recursive: true, force: true }); }
 console.log("Synthetic-only observations are sanitized, atomically published, and reject incomplete or mismatched evidence.");

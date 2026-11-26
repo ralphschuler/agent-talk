@@ -13,8 +13,8 @@ const signRecord = input => {
   const { signature: ignored, ...unsigned } = input;
   return { ...unsigned, signature: sign(null, Buffer.from(JSON.stringify(unsigned)), signingKey).toString("base64url") };
 };
-const record = signRecord({ schema: "agent-talk-staging-observation-v1", mode: "staging-interactive", release, deployment,
-  storage: { ownerRows: 1, mailboxRows: 1, groupRows: 1 }, routing: {
+const record = signRecord({ schema: "agent-talk-staging-observation-v2", mode: "staging-interactive", release, deployment,
+  storage: { status: "pending" }, startedAt: new Date(now - 5000).toISOString(), routing: {
     agentId: "at1_" + publicKey, deviceId: "at1_" + "B".repeat(43), recipientId: "at1_" + "C".repeat(43),
     groupId: "11111111-1111-4111-8111-111111111111", offlineMessageId: "22222222-2222-4222-8222-222222222222",
     groupMessageId: "33333333-3333-4333-8333-333333333333" },
@@ -29,7 +29,7 @@ function response(mode, fingerprint) {
     if (path.endsWith("/jobs")) return Response.json({ jobs: [{ conclusion: "success", status: "completed", steps: [{ name: "Verify the deployed version and unauthenticated boundary", conclusion: mode === "deploy-failed" ? "failure" : "success" }] }] });
     if (path.includes("owner-portal-test.yml")) return Response.json({ workflow_runs: [{ id: 111, run_attempt: 1, head_sha: release,
       head_branch: "main", event: "workflow_dispatch", conclusion: "success", status: "completed", head_repository: { full_name: "ralphschuler/agent-talk" },
-      path: ".github/workflows/owner-portal-test.yml@main", updated_at: new Date(now - 2000).toISOString() }] });
+      path: ".github/workflows/owner-portal-test.yml@main", updated_at: new Date(now - 10000).toISOString() }] });
     if (path.includes("owner-portal-live-e2e.yml")) return Response.json({ workflow_runs: mode === "replay" ? [{ id: 999,
       display_title: "Owner live evidence " + fingerprint + " " + deployment.versionId + " " + deployment.deploymentId,
       head_repository: { full_name: "ralphschuler/agent-talk" }, head_branch: "main", event: "workflow_dispatch", conclusion: "success" }] : [] });

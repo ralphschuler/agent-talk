@@ -5,16 +5,16 @@ import { createPrivateKey, createPublicKey, randomBytes, sign } from "node:crypt
 import { link, open, unlink } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 
-export async function writeSanitizedObservation({ path, release, deployment, storage, routing, materialDigests, signingSecretKey, mode = "staging-interactive" }) {
+export async function writeSanitizedObservation({ path, release, deployment, startedAt, routing, materialDigests, signingSecretKey, mode = "staging-interactive" }) {
   assert.ok(typeof path === "string" && path.length > 0, "An output path is required.");
   assert.match(release ?? "", /^[a-f0-9]{40}$/, "An exact release is required.");
   assert.ok(["staging-interactive", "synthetic-fixture"].includes(mode), "Invalid observation mode.");
   const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
   assert.ok(deployment && (uuid.test(deployment.deploymentId ?? "") || /^[a-f0-9]{32}$/i.test(deployment.deploymentId ?? "")) &&
     uuid.test(deployment.versionId ?? ""), "An exact deployment and version are required.");
-  assert.ok(storage?.ownerRows === 1 && storage?.mailboxRows === 1 && storage?.groupRows === 1 &&
-    storage?.deployment?.deploymentId === deployment.deploymentId && storage?.deployment?.versionId === deployment.versionId,
-  "A matching successful storage inspection is required.");
+  const started = Date.parse(startedAt);
+  assert.ok(Number.isFinite(started) && new Date(started).toISOString() === startedAt && started <= Date.now() &&
+    Date.now() - started <= 2 * 60 * 60_000, "A fresh staging start time is required.");
   const agent = /^at1_[A-Za-z0-9_-]{43}$/;
   for (const name of ["agentId", "deviceId", "recipientId"]) assert.match(routing?.[name] ?? "", agent, "Invalid synthetic routing identity.");
   for (const name of ["groupId", "offlineMessageId", "groupMessageId"]) assert.match(routing?.[name] ?? "", uuid, "Invalid synthetic routing identifier.");
@@ -31,9 +31,9 @@ export async function writeSanitizedObservation({ path, release, deployment, sto
   const privateKey = createPrivateKey({ key: Buffer.concat([Buffer.from("302e020100300506032b657004220420", "hex"), seed]), format: "der", type: "pkcs8" });
   const publicKey = createPublicKey(privateKey).export({ type: "spki", format: "der" }).subarray(-32).toString("base64url");
   assert.equal("at1_" + publicKey, routing.agentId, "Signing key does not match the synthetic sender.");
-  const unsigned = { schema: "agent-talk-staging-observation-v1", mode, release,
+  const unsigned = { schema: "agent-talk-staging-observation-v2", mode, release,
     deployment: { deploymentId: deployment.deploymentId, versionId: deployment.versionId },
-    storage: { ownerRows: 1, mailboxRows: 1, groupRows: 1 },
+    storage: { status: "pending" }, startedAt,
     routing: Object.fromEntries(["agentId", "deviceId", "recipientId", "groupId", "offlineMessageId", "groupMessageId"].map(name => [name, routing[name]])),
     materialDigests: materialDigests.map(({ kind, length, sha256 }) => ({ kind, length, sha256 })),
     observedAt: new Date().toISOString(),
