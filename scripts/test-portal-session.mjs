@@ -173,6 +173,9 @@ async function browserSmoke(sessionCookie, agentId, expectEmpty = false, multiAg
       portal: localPortal, deviceId: request.device.agentId, minutes: 30,
     } });
     assert.notEqual(enable.isError, true);
+    await evaluate('Array.from(document.querySelectorAll("#agents button")).find(b => b.textContent === ' + JSON.stringify(agentId) + ')?.click()');
+    await waitFor('document.querySelector("#status")?.textContent === "Messages loaded."');
+    assert.equal(await evaluate('document.querySelectorAll("#messages article").length'), 0);
     const backfill = await mcp.callTool({ name: "owner_thread_backfill", arguments: {
       deviceId: request.device.agentId, peerId: sender.agentId, threadId: "synthetic-thread",
     } });
@@ -212,6 +215,9 @@ async function browserSmoke(sessionCookie, agentId, expectEmpty = false, multiAg
         portal: localPortal, deviceId: secondRequest.device.agentId, minutes: 30,
       } });
       assert.notEqual(secondEnable.isError, true);
+      await evaluate('Array.from(document.querySelectorAll("#agents button")).find(b => b.textContent === ' + JSON.stringify(multiAgent.secondAgentId) + ')?.click()');
+      await waitFor('document.querySelector("#status")?.textContent === "Messages loaded."');
+      assert.equal(await evaluate('document.querySelectorAll("#messages article").length'), 0);
       const secondBackfill = await secondMcp.callTool({ name: "owner_thread_backfill", arguments: {
         deviceId: secondRequest.device.agentId, peerId: agentId, threadId: multiAgent.threadId,
       } });
