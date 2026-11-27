@@ -7,10 +7,12 @@ declare const process: { env: { EXPECTED_RELEASE?: string; AGENT_TALK_TEST_OAUTH
 export default defineConfig(({ mode }) => {
   const release = process.env.EXPECTED_RELEASE ?? "local";
   if (process.env.EXPECTED_RELEASE !== undefined && !/^[a-f0-9]{40}$/.test(release)) throw new Error("EXPECTED_RELEASE must be a full Git commit SHA");
-  const isTest = mode === "test";
-  const workerName = isTest ? "agent-talk-test" : "agent-talk";
+  const isCanonicalTest = mode === "canonical-test";
+  const isTest = mode === "test" || isCanonicalTest;
+  const workerName = isCanonicalTest ? "agent-talk-canonical-test" : isTest ? "agent-talk-test" : "agent-talk";
   const oauthKv = isTest ? process.env.AGENT_TALK_TEST_OAUTH_KV_ID : undefined;
   const oauthClient = isTest ? process.env.OWNER_OAUTH_CLIENT_ID : undefined;
+  if (isCanonicalTest && (!oauthKv || !oauthClient)) throw new Error("Canonical test OAuth configuration required");
   if (!!oauthKv !== !!oauthClient || (oauthKv && !/^[a-f0-9]{32}$/.test(oauthKv))) throw new Error("Invalid test OAuth configuration");
   const testOauthBindings = oauthKv && oauthClient ? {
     OAUTH_KV: bindings.kv({ id: oauthKv }),
@@ -31,7 +33,7 @@ export default defineConfig(({ mode }) => {
     env: {
       ...testOauthBindings,
       RELEASE_SHA: bindings.text(release),
-      PROJECT_OWNER: bindings.text("ralphschuler/agent-talk:" + (isTest ? "test" : "production")),
+      PROJECT_OWNER: bindings.text("ralphschuler/agent-talk:" + (isCanonicalTest ? "canonical-test" : isTest ? "test" : "production")),
       DIRECTORY: bindings.durableObject({ worker: workerName, exportName: "Directory" }),
       MAILBOX: bindings.durableObject({ worker: workerName, exportName: "Mailbox" }),
       PORTAL_STORE: bindings.durableObject({ worker: workerName, exportName: "PortalStore" }),

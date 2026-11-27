@@ -29,3 +29,8 @@ jobs:
       - run: node scripts/test-local-e2e.mjs
       - run: npm run build
       - run: npx cf build --mode test
+      - name: Dry-run isolated canonical test deployment
+        run: npx cf deploy --dry-run --mode canonical-test
+        env:
+          AGENT_TALK_TEST_OAUTH_KV_ID: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          OWNER_OAUTH_CLIENT_ID: synthetic-client
