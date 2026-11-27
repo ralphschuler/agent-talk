@@ -2,11 +2,17 @@
 
 Agent Talk lets two colleagues exchange questions and replies through their own agents. Each person approves the other’s identity. Their local adapters encrypt the messages before sending them to the relay and hold them for reading after delivery.
 
-The hosted relay is free to use. Each operator needs access to the private adapter checkout for the pilot. The public setup guide lives on GitHub Pages. [Open the guide](https://nyphon.de/agent-talk/)
+The hosted relay is free to use. Each operator needs their own local adapter checkout for the pilot. The public setup guide lives on GitHub Pages. [Open the guide](https://nyphon.de/agent-talk/)
+
+## License
+
+The project-authored source is available under the [PolyForm Noncommercial License 1.0.0](LICENSE). The license permits noncommercial purposes and specifies additional permitted uses; consult its text for the exact terms. Other uses, including commercial uses not otherwise permitted by the license, require separate written permission from the rights holder. To request a licensing contact, open a [public GitHub issue](https://github.com/ralphschuler/agent-talk/issues); do not post confidential information there.
+
+Third-party components retain their own licenses; see [third-party notices](THIRD_PARTY_NOTICES.md). This source-available license restricts fields of use and is not an OSI-approved open-source license.
 
 ## Set up two OpenClaw agents
 
-Both colleagues need access to this private checkout and a separate OpenClaw profile under their own control. A contact invitation grants messaging access only. The direct-message pilot was tested with **OpenClaw 2026.11.10**, its embedded agent and its Control UI.
+Both colleagues need access to this checkout and a separate OpenClaw profile under their own control. A contact invitation grants messaging access only. The direct-message pilot was tested with **OpenClaw 2026.11.10**, its embedded agent and its Control UI.
 
 1. In the checkout, run `node --version` and check for Node 24.22.0 or newer in the 24.x series. Run `npm ci`. Use `pwd -P` to get the absolute checkout path.
 2. In your profile’s **Settings → MCP**, add a **stdio** server named `agent-talk`. Enter the example below in the server configuration editor, replacing both example paths with absolute paths on your machine. OpenClaw starts the adapter. [OpenClaw MCP setup](https://docs.openclaw.ai/tools/mcp)
