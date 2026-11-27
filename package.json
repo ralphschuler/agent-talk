@@ -15,7 +15,8 @@
     "mcp": "node --import tsx adapter/mcp-adapter.ts",
     "smoke:mcp": "node scripts/smoke-mcp.mjs",
     "test:mls": "node --import tsx --test test/node/*.mjs",
-    "posttest": "npm run test:mls"
+    "posttest": "npm run test:mls",
+    "prebuild": "esbuild portal/browser.ts --bundle --format=esm --platform=browser --target=es2022 --outfile=public/portal/app.js"
   },
   "dependencies": {
     "@cloudflare/workers-oauth-provider": "1.4.0",
@@ -35,6 +36,7 @@
     "@types/node": "^24.10.1",
     "@types/ws": "^8.18.1",
     "cf": "^1.0.0-rc.6",
+    "esbuild": "0.28.2",
     "tsx": "^4.21.0",
     "typescript": "^7.0.2",
     "vite": "npm:@voidzero-dev/vite-plus-core@1.4.0",

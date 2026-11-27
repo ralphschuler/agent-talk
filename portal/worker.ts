@@ -61,6 +61,7 @@ export class PortalStore extends DurableObject<PortalEnv> {
     this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS owner_copies (agent_id TEXT NOT NULL, device_id TEXT NOT NULL, message_id TEXT NOT NULL, envelope_json TEXT NOT NULL, PRIMARY KEY(agent_id, device_id, message_id)); CREATE TABLE IF NOT EXISTS device_nonces (device_id TEXT NOT NULL, nonce TEXT NOT NULL, expires INTEGER NOT NULL, PRIMARY KEY(device_id, nonce));");
     this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS pending_pairs (nonce TEXT PRIMARY KEY, account_id TEXT NOT NULL, session_hash TEXT NOT NULL, request_json TEXT NOT NULL, expires INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS agents (agent_id TEXT PRIMARY KEY, account_id TEXT NOT NULL, agent_json TEXT NOT NULL); CREATE TABLE IF NOT EXISTS devices (agent_id TEXT NOT NULL, device_id TEXT NOT NULL, device_json TEXT NOT NULL, grant_nonce TEXT NOT NULL, PRIMARY KEY(agent_id, device_id));");
     initAuthTransactions(this.ctx.storage);
+    this.sql.exec("CREATE TABLE IF NOT EXISTS mcp_auth_pending (state_hash TEXT PRIMARY KEY, authorize_url TEXT NOT NULL, expires INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS mcp_login_sessions (token_hash TEXT PRIMARY KEY, account_id TEXT NOT NULL, expires INTEGER NOT NULL);");
     this.sql.exec(`CREATE TABLE IF NOT EXISTS transactions (
       state_hash TEXT PRIMARY KEY, cookie_hash TEXT NOT NULL, verifier TEXT NOT NULL, expires INTEGER NOT NULL
     ); CREATE TABLE IF NOT EXISTS sessions (
@@ -78,11 +79,28 @@ export class PortalStore extends DurableObject<PortalEnv> {
     };
     if (url.pathname === "/authorize" || url.pathname === "/oauth/consent") {
       if (!this.env.OAUTH_KV) return response({ error: "MCP authorization unavailable" }, 503);
-      const token = cookie(request, "__Host-at_session");
-      if (!/^[A-Za-z0-9_-]{43}$/.test(token)) return response({ error: "Sign in to the owner portal before authorizing an MCP client" }, 401);
-      const session = this.sql.exec<{ account_id: string }>("SELECT account_id FROM sessions WHERE token_hash = ? AND expires > ?", await hash(token), Date.now()).toArray()[0];
-      if (!session) return response({ error: "Unauthorized" }, 401);
       const oauth = oauthIssuer({ PORTAL_ORIGIN: this.env.PORTAL_ORIGIN, OAUTH_KV: this.env.OAUTH_KV }).getOAuthApi({ PORTAL_ORIGIN: this.env.PORTAL_ORIGIN, OAUTH_KV: this.env.OAUTH_KV });
+      const mcpToken = cookie(request, "__Host-at_mcp");
+      const dashboardToken = cookie(request, "__Host-at_session");
+      const mcpHash = /^[A-Za-z0-9_-]{43}$/.test(mcpToken) ? await hash(mcpToken) : "";
+      const dashboardHash = /^[A-Za-z0-9_-]{43}$/.test(dashboardToken) ? await hash(dashboardToken) : "";
+      const mcpSession = mcpHash ? this.sql.exec<{ account_id: string }>("SELECT account_id FROM mcp_login_sessions WHERE token_hash = ? AND expires > ?", mcpHash, Date.now()).toArray()[0] : undefined;
+      const session = mcpSession ?? (dashboardHash ? this.sql.exec<{ account_id: string }>("SELECT account_id FROM sessions WHERE token_hash = ? AND expires > ?", dashboardHash, Date.now()).toArray()[0] : undefined);
+      if (!session) {
+        if (url.pathname !== "/authorize" || request.method !== "GET" || url.href.length > 8192) return response({ error: "Unauthorized" }, 401);
+        try {
+          const authRequest = await oauth.parseAuthRequest(request);
+          if (authRequest.scope.length !== 1 || authRequest.scope[0] !== PROVIDER_SCOPE) return response({ error: "Invalid scope" }, 400);
+          const { transaction, url: authorizationUrl } = await beginAuthorization(config);
+          const browserToken = random();
+          const stateHash = await hash(transaction.state);
+          const inserted = saveAuthTransaction(this.ctx.storage, { stateHash, browserHash: await hash(browserToken), verifier: transaction.verifier, expires: transaction.expiresAt, flow: "mcp" }, Date.now());
+          if (!inserted) return response({ error: "Too many pending authorizations" }, 429);
+          this.sql.exec("DELETE FROM mcp_auth_pending WHERE expires <= ?", Date.now());
+          this.sql.exec("INSERT INTO mcp_auth_pending VALUES (?, ?, ?)", stateHash, url.href, transaction.expiresAt);
+          return new Response(null, { status: 302, headers: { Location: authorizationUrl, "Cache-Control": "no-store", "Referrer-Policy": "no-referrer", "Set-Cookie": `__Host-at_auth=${browserToken}; ${cookieOptions}; Max-Age=300` } });
+        } catch { return response({ error: "Invalid authorization request" }, 400); }
+      }
       if (url.pathname === "/authorize" && request.method === "GET") {
         try {
           const authRequest = await oauth.parseAuthRequest(request);
@@ -109,11 +127,12 @@ export class PortalStore extends DurableObject<PortalEnv> {
         if ([...form.keys()].some(key => !["handle", "agent", "decision"].includes(key)) || form.getAll("handle").length !== 1 || form.getAll("decision").length !== 1 || form.getAll("agent").length > 1) return response({ error: "Invalid request" }, 400);
         const handle = form.get("handle")!, agent = form.get("agent") ?? "", decision = form.get("decision");
         try {
-          if (decision === "deny") { const denied = await oauth.denyConsent(request, handle); return new Response(null, { status: 303, headers: denied.headers }); }
+          if (decision === "deny") { const denied = await oauth.denyConsent(request, handle); const headers = new Headers(denied.headers); if (mcpSession) { this.sql.exec("DELETE FROM mcp_login_sessions WHERE token_hash = ?", mcpHash); headers.append("Set-Cookie", `__Host-at_mcp=; ${cookieOptions}; Max-Age=0`); } return new Response(null, { status: 303, headers }); }
           if (decision !== "approve" || !agentId(agent) || !this.sql.exec("SELECT 1 FROM agents WHERE agent_id = ? AND account_id = ?", agent, session.account_id).toArray().length) return response({ error: "Agent is not owned by this account" }, 403);
           const approved = await oauth.approveConsent(request, handle, { scope: [PROVIDER_SCOPE] });
           const result = await oauth.completeAuthorization({ request: approved.request, userId: session.account_id, metadata: {}, scope: [PROVIDER_SCOPE], props: { agentId: agent } });
           const headers = new Headers(approved.headers); headers.set("Location", result.redirectTo); headers.set("Cache-Control", "no-store");
+          if (mcpSession) { this.sql.exec("DELETE FROM mcp_login_sessions WHERE token_hash = ?", mcpHash); headers.append("Set-Cookie", `__Host-at_mcp=; ${cookieOptions}; Max-Age=0`); }
           return new Response(null, { status: 303, headers });
         } catch { return response({ error: "Invalid or expired consent" }, 400); }
       }
@@ -145,7 +164,6 @@ export class PortalStore extends DurableObject<PortalEnv> {
       const browserHash = await hash(browserToken);
       const row = consumeAuthTransaction(this.ctx.storage, stateHash, browserHash, Date.now());
       if (!row) return response({ error: "Invalid authorization" }, 400);
-      if (row.flow !== "dashboard") return response({ error: "MCP authorization unavailable" }, 503);
       let accountId: string;
       try {
         const fetcher: typeof fetch = this.env.OAUTH_TEST_PROVIDER
@@ -156,9 +174,25 @@ export class PortalStore extends DurableObject<PortalEnv> {
         return response({ error: "Authorization failed" }, 401);
       }
       const token = random();
+      if (row.flow === "mcp") {
+        const pending = this.ctx.storage.transactionSync(() => {
+          const found = this.sql.exec<{ authorize_url: string }>("SELECT authorize_url FROM mcp_auth_pending WHERE state_hash = ? AND expires > ?", stateHash, Date.now()).toArray()[0];
+          this.sql.exec("DELETE FROM mcp_auth_pending WHERE state_hash = ?", stateHash);
+          return found;
+        });
+        if (!pending) return response({ error: "Invalid authorization" }, 400);
+        const resume = new URL(pending.authorize_url);
+        if (resume.origin !== this.env.PORTAL_ORIGIN || resume.pathname !== "/authorize") return response({ error: "Invalid authorization" }, 400);
+        this.sql.exec("DELETE FROM mcp_login_sessions WHERE expires <= ?", Date.now());
+        this.sql.exec("INSERT INTO mcp_login_sessions VALUES (?, ?, ?)", await hash(token), accountId, Date.now() + 300_000);
+        const headers = new Headers({ Location: resume.href, "Cache-Control": "no-store", "Referrer-Policy": "no-referrer" });
+        headers.append("Set-Cookie", `__Host-at_mcp=${token}; ${cookieOptions}; Max-Age=300`);
+        headers.append("Set-Cookie", `__Host-at_auth=; ${cookieOptions}; Max-Age=0`);
+        return new Response(null, { status: 303, headers });
+      }
       this.sql.exec("DELETE FROM sessions WHERE expires <= ?", Date.now());
       this.sql.exec("INSERT INTO sessions VALUES (?, ?, ?)", await hash(token), accountId, Date.now() + 8 * 60 * 60_000);
-      const headers = new Headers({ Location: "/", "Cache-Control": "no-store", "Referrer-Policy": "no-referrer" });
+      const headers = new Headers({ Location: "/portal/", "Cache-Control": "no-store", "Referrer-Policy": "no-referrer" });
       headers.append("Set-Cookie", `__Host-at_session=${token}; ${cookieOptions}; Max-Age=28800`);
       headers.append("Set-Cookie", `__Host-at_auth=; ${cookieOptions}; Max-Age=0`);
       return new Response(null, { status: 303, headers });

@@ -4,6 +4,8 @@ import { build } from 'esbuild';
 import { createLocalIdentity, signRequest, signInvite, sealEnvelope } from '../../src/crypto.ts';
 import { approvePairing } from '../../portal/pairing.ts';
 import { createHash, randomBytes } from 'node:crypto';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
 
 test('canonical Worker issues agent-bound OAuth token after explicit owner consent', async () => {
@@ -39,7 +41,18 @@ test('canonical Worker issues agent-bound OAuth token after explicit owner conse
     const verifier = randomBytes(32).toString('base64url');
     const challenge = createHash('sha256').update(verifier).digest('base64url');
     const query = new URLSearchParams({client_id:client.client_id,redirect_uri:'http://127.0.0.1:33291/callback',response_type:'code',scope:'agent-talk:relay',state:'synthetic-state',resource:base+'/mcp',code_challenge:challenge,code_challenge_method:'S256'});
-    const consent = await mf.dispatchFetch(base+'/authorize?'+query,{headers:{cookie:session}});
+    const initial = await mf.dispatchFetch(base+'/authorize?'+query,{redirect:'manual'});
+    assert.equal(initial.status,302);
+    const github = new URL(initial.headers.get('location'));
+    assert.equal(github.hostname,'github.com');
+    const mcpState=github.searchParams.get('state');
+    const mcpAuthCookie=initial.headers.get('set-cookie').split(';')[0];
+    const resumed=await mf.dispatchFetch(base+'/auth/callback?state='+mcpState+'&code=synthetic-code',{headers:{cookie:mcpAuthCookie},redirect:'manual'});
+    assert.equal(resumed.status,303,await resumed.clone().text());
+    assert.equal((await mf.dispatchFetch(base+'/auth/callback?state='+mcpState+'&code=synthetic-code',{headers:{cookie:mcpAuthCookie}})).status,400);
+    const mcpSession=resumed.headers.get('set-cookie').match(/__Host-at_mcp=[^;,]+/)[0];
+    assert.equal((await mf.dispatchFetch(base+'/auth/account',{headers:{cookie:mcpSession}})).status,401);
+    const consent = await mf.dispatchFetch(resumed.headers.get('location'),{headers:{cookie:mcpSession}});
     assert.equal(consent.status,200,await consent.clone().text());
     const page=await consent.text();
     assert.ok(page.includes(agent.agentId));
@@ -47,12 +60,12 @@ test('canonical Worker issues agent-bound OAuth token after explicit owner conse
     const consentCookie=consent.headers.get('set-cookie').split(';')[0];
     const form=new URLSearchParams({handle,agent:agent.agentId,decision:'approve'}).toString();
     const forged=new URLSearchParams({handle,agent:'at1_'+ 'A'.repeat(43),decision:'approve'}).toString();
-    const badConsent=await mf.dispatchFetch(base+'/oauth/consent',{method:'POST',headers:{origin:base,cookie:session+'; '+consentCookie,'content-type':'application/x-www-form-urlencoded','content-length':String(Buffer.byteLength(forged))},body:forged});
+    const badConsent=await mf.dispatchFetch(base+'/oauth/consent',{method:'POST',headers:{origin:base,cookie:mcpSession+'; '+consentCookie,'content-type':'application/x-www-form-urlencoded','content-length':String(Buffer.byteLength(forged))},body:forged});
     assert.equal(badConsent.status,403);
-    const consentResponse=await mf.dispatchFetch(base+'/oauth/consent',{method:'POST',headers:{origin:base,cookie:session+'; '+consentCookie,'content-type':'application/x-www-form-urlencoded','content-length':String(Buffer.byteLength(form))},body:form,redirect:'manual'});
+    const consentResponse=await mf.dispatchFetch(base+'/oauth/consent',{method:'POST',headers:{origin:base,cookie:mcpSession+'; '+consentCookie,'content-type':'application/x-www-form-urlencoded','content-length':String(Buffer.byteLength(form))},body:form,redirect:'manual'});
     assert.equal(consentResponse.status,303,await consentResponse.clone().text());
-    const replayConsent=await mf.dispatchFetch(base+'/oauth/consent',{method:'POST',headers:{origin:base,cookie:session+'; '+consentCookie,'content-type':'application/x-www-form-urlencoded','content-length':String(Buffer.byteLength(form))},body:form});
-    assert.equal(replayConsent.status,400);
+    const replayConsent=await mf.dispatchFetch(base+'/oauth/consent',{method:'POST',headers:{origin:base,cookie:mcpSession+'; '+consentCookie,'content-type':'application/x-www-form-urlencoded','content-length':String(Buffer.byteLength(form))},body:form});
+    assert.equal(replayConsent.status,401);
     const code=new URL(consentResponse.headers.get('location')).searchParams.get('code');
     assert.ok(code);
     const tokenResponse=await mf.dispatchFetch(base+'/oauth/token',{method:'POST',headers:{'content-type':'application/x-www-form-urlencoded'},body:new URLSearchParams({grant_type:'authorization_code',client_id:client.client_id,redirect_uri:'http://127.0.0.1:33291/callback',code,code_verifier:verifier,resource:base+'/mcp'}).toString()});
@@ -61,6 +74,13 @@ test('canonical Worker issues agent-bound OAuth token after explicit owner conse
     assert.ok(access);
     const mcp = await mf.dispatchFetch(base+'/mcp',{method:'POST',headers:{authorization:'Bearer '+access,'content-type':'application/json',accept:'application/json, text/event-stream'},body:JSON.stringify({jsonrpc:'2.0',id:1,method:'initialize',params:{protocolVersion:'2025-06-18',capabilities:{},clientInfo:{name:'synthetic',version:'1'}}})});
     assert.equal(mcp.status,200,await mcp.clone().text());
+    const sdk = new Client({name:'synthetic',version:'1'});
+    await sdk.connect(new StreamableHTTPClientTransport(new URL(base+'/mcp'), {fetch:(input, init) => {
+      const headers = new Headers(init?.headers); headers.set('authorization','Bearer '+access);
+      return mf.dispatchFetch(input, {...init,headers});
+    }}));
+    assert.ok((await sdk.listTools()).tools.some(tool => tool.name === 'relay_send_envelope'));
+
     const b = await createLocalIdentity();
     const relayPost = async (identity, action, payload) => {
       const timestamp=String(Date.now());
@@ -83,6 +103,7 @@ test('canonical Worker issues agent-bound OAuth token after explicit owner conse
     assert.equal((await call(b.agentId)).result.isError,true);
     assert.notEqual((await call(agent.agentId)).result.isError,true);
     assert.equal((await call(agent.agentId)).result.isError,true);
+    await sdk.close();
 
     assert.equal((await mf.dispatchFetch(base+'/auth/mcp/login',{method:'POST',headers:{origin:base}})).status,503);
   } finally { await mf.dispose(); }

@@ -9,6 +9,6 @@ try {
   const archive = join(directory, "companion.tar");
   execFileSync("python3", ["scripts/build-companion.py", archive], { stdio: "pipe" });
   assert.equal(createHash("sha256").update(await readFile(archive)).digest("hex"),
-    "71e064f2e1152cb4033c01a558b3ae698303d143f82f435dcc6e9a2a2d2466ee");
+    "2dce66f6c20c3b7171d855310e433e9a6ff3a36b4c379307f24889c41f2b99dc");
   console.log("Versioned public companion archive is reproducible.");
 } finally { await rm(directory, { recursive: true, force: true }); }

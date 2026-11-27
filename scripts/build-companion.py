@@ -10,6 +10,7 @@ if len(sys.argv) != 2:
 output = pathlib.Path(sys.argv[1])
 files = [(root / 'distribution/companion' / name, name) for name in ('README.md', 'package.json', 'package-lock.json')]
 files += [(path, str(path.relative_to(root))) for path in sorted((root / 'adapter').glob('*.ts'))]
+files += [(root / 'portal' / 'pairing.ts', 'portal/pairing.ts')]
 files += [(root / 'src' / (name + '.ts'), 'src/' + name + '.ts') for name in ('auth', 'crypto', 'direct', 'group-protocol', 'protocol', 'validation')]
 with tarfile.open(output, mode='w', format=tarfile.USTAR_FORMAT) as tar:
     for path, name in files:
