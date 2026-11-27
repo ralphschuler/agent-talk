@@ -1,0 +1,18 @@
+import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { auditPasses } from './audit.mjs';
+const root = fileURLToPath(new URL('../', import.meta.url));
+const eslint = fileURLToPath(new URL('../node_modules/eslint/bin/eslint.js', import.meta.url));
+const scan = input => spawnSync(process.execPath, [eslint, '--config', 'eslint.security.config.mjs', '--stdin', '--stdin-filename', 'security/synthetic.ts'], { cwd:root, input, encoding:'utf8' });
+const unsafe = scan('const input: string = "synthetic"; eval(input);\n');
+assert.equal(unsafe.status, 1, 'The scanner must reject the synthetic unsafe pattern');
+assert.match(unsafe.stdout, /no-eval/);
+assert.equal(scan('const value: string = "safe";\n').status, 0, 'The scanner must accept the benign fixture');
+const counts = { info:0, low:0, moderate:0, high:0, critical:0 };
+assert.equal(auditPasses({metadata:{vulnerabilities:counts}}, 0), true);
+assert.equal(auditPasses({metadata:{vulnerabilities:{...counts,high:1}}}, 1), false);
+assert.equal(auditPasses({metadata:{vulnerabilities:{...counts,critical:1}}}, 1), false);
+assert.equal(auditPasses({metadata:{vulnerabilities:counts}}, 1), false);
+assert.equal(auditPasses({}, 0), false);
+console.log('Synthetic scanner and audit-policy refusal checks passed.');

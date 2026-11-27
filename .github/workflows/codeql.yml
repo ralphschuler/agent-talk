@@ -14,6 +14,7 @@ permissions:
 
 jobs:
   analyze:
+    if: vars.ENABLE_CODEQL == 'true'
     name: Analyze JavaScript and TypeScript
     runs-on: ubuntu-latest
     timeout-minutes: 30
