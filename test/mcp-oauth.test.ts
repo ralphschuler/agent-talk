@@ -1,12 +1,16 @@
 import { expect, it } from "vite-plus/test";
 import { generateKeyPair, SignJWT } from "jose";
-import { MCP_SCOPE, protectedResourceMetadata, verifyMcpAccessToken } from "../src/mcp-oauth.ts";
+import { guardMcpRequest, MCP_SCOPE, protectedResourceMetadata, verifyMcpAccessToken } from "../src/mcp-oauth.ts";
 
 const config = { issuer: "https://issuer.example/", resource: "https://relay.example/mcp", jwksUri: "https://issuer.example/jwks" };
 it("advertises only the configured HTTPS resource and issuer", () => {
   expect(protectedResourceMetadata(config)).toEqual({ resource: config.resource, authorization_servers: [config.issuer], scopes_supported: [MCP_SCOPE], bearer_methods_supported: ["header"] });
   expect(() => protectedResourceMetadata({ ...config, issuer: "http://issuer.example/" })).toThrow();
   expect(() => protectedResourceMetadata({ ...config, resource: "https://relay.example/mcp?token=x" })).toThrow();
+});
+it("fails closed without configuration and rejects plain HTTP", async () => {
+  expect((await guardMcpRequest(new Request(config.resource), undefined))?.status).toBe(503);
+  expect((await guardMcpRequest(new Request("http://relay.example/mcp"), config))?.status).toBe(403);
 });
 it("requires a valid signature, exact issuer, audience, expiry and scope", async () => {
   const { privateKey, publicKey } = await generateKeyPair("ES256");

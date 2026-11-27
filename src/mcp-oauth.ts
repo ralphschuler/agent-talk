@@ -35,3 +35,21 @@ export async function verifyMcpAccessToken(token: string, config: OAuthConfig, g
     throw new Error("Insufficient scope");
   }
 }
+
+/** A null result means authorized. Missing configuration is never anonymous access. */
+export async function guardMcpRequest(request: Request, config: OAuthConfig | undefined, getKey?: JWTVerifyGetKey): Promise<Response | null> {
+  const url = new URL(request.url);
+  if (url.protocol !== "https:") return new Response("HTTPS required", { status: 403, headers: { "cache-control": "no-store" } });
+  if (!config) return new Response("OAuth is not configured", { status: 503, headers: { "cache-control": "no-store" } });
+  try { validateOAuthConfig(config); } catch { return new Response("OAuth is not configured", { status: 503, headers: { "cache-control": "no-store" } }); }
+  if (config.resource !== url.origin + "/mcp") return new Response("OAuth resource mismatch", { status: 503, headers: { "cache-control": "no-store" } });
+  const metadata = url.origin + "/.well-known/oauth-protected-resource/mcp";
+  const challenge = `Bearer resource_metadata="${metadata}", scope="${MCP_SCOPE}"`;
+  const auth = request.headers.get("authorization") ?? "";
+  const match = /^Bearer ([A-Za-z0-9._~-]+)$/i.exec(auth);
+  if (!match) return new Response("Unauthorized", { status: 401, headers: { "www-authenticate": challenge, "cache-control": "no-store" } });
+  try { await verifyMcpAccessToken(match[1], config, getKey); } catch {
+    return new Response("Unauthorized", { status: 401, headers: { "www-authenticate": challenge, "cache-control": "no-store" } });
+  }
+  return null;
+}

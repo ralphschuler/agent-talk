@@ -1,3 +1,4 @@
+import { guardMcpRequest, protectedResourceMetadata } from "./mcp-oauth.ts";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { z } from "zod";
@@ -9,6 +10,9 @@ import { agentId, asEnvelope, asIdentity, asInvite, canonicalBytes, CLOCK_SKEW, 
 
 export interface Env {
   RELEASE_SHA: string;
+  MCP_OAUTH_ISSUER?: string;
+  MCP_OAUTH_RESOURCE?: string;
+  MCP_OAUTH_JWKS_URI?: string;
   DIRECTORY: DurableObjectNamespace<Directory>;
   MAILBOX: DurableObjectNamespace<Mailbox>;
 }
@@ -44,10 +48,18 @@ async function signed(publicKey: string, signature: string, message: Uint8Array)
 const worker = {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
+    const oauth = env.MCP_OAUTH_ISSUER && env.MCP_OAUTH_RESOURCE && env.MCP_OAUTH_JWKS_URI
+      ? { issuer: env.MCP_OAUTH_ISSUER, resource: env.MCP_OAUTH_RESOURCE, jwksUri: env.MCP_OAUTH_JWKS_URI } : undefined;
+    if (url.pathname === "/.well-known/oauth-protected-resource/mcp") {
+      if (url.protocol !== "https:" || request.method !== "GET" || !oauth || oauth.resource !== url.origin + "/mcp") return fail("OAuth metadata unavailable", 503);
+      try { return json(protectedResourceMetadata(oauth)); } catch { return fail("OAuth metadata unavailable", 503); }
+    }
     if (url.pathname === "/mcp") {
       // Browser origins are not supported. The signed operation remains bound to
       // the existing relay authentication, contact and replay checks.
       if (request.headers.has("origin")) return fail("origin not allowed", 403);
+      const denied = await guardMcpRequest(request, oauth);
+      if (denied) return denied;
       // Delivery uses the existing authenticated WebSocket, not an idle MCP stream.
       if (request.method === "GET") return fail("stream not available", 405);
       const server = new McpServer({ name: "agent-talk-ciphertext-relay", version: "0.2.0" });
