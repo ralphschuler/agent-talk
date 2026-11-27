@@ -3,7 +3,7 @@ export type AuthFlow = "dashboard" | "mcp";
 export interface Transaction { stateHash: string; browserHash: string; verifier: string; expires: number; flow: AuthFlow; }
 export interface AuthTransactionStorage {
   transactionSync<T>(callback: () => T): T;
-  sql: { exec<T extends Record<string, unknown> = Record<string, unknown>>(query: string, ...bindings: (string | number)[]): { toArray(): T[] } };
+  sql: { exec<T extends Record<string, SqlStorageValue> = Record<string, SqlStorageValue>>(query: string, ...bindings: (string | number)[]): { toArray(): T[] } };
 }
 
 export function initAuthTransactions(storage: AuthTransactionStorage): void {

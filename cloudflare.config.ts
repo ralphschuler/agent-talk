@@ -21,14 +21,16 @@ export default defineConfig(({ mode }) => {
       PROJECT_OWNER: bindings.text("ralphschuler/agent-talk:" + (isTest ? "test" : "production")),
       DIRECTORY: bindings.durableObject({ worker: workerName, exportName: "Directory" }),
       MAILBOX: bindings.durableObject({ worker: workerName, exportName: "Mailbox" }),
+      PORTAL_STORE: bindings.durableObject({ worker: workerName, exportName: "PortalStore" }),
     },
     assets: {
       // Static assets are served before this Worker. Only relay paths execute code.
-      runWorkerFirst: ["/v1/*", "/healthz", "/mcp", "/.well-known/oauth-protected-resource/mcp"],
+      runWorkerFirst: ["/v1/*", "/healthz", "/mcp", "/.well-known/oauth-protected-resource/mcp", "/auth/*", "/agents", "/pairing/*", "/device/*", "/copy/*"],
     },
     exports: {
       Directory: exports.durableObject({ storage: "sqlite" }),
       Mailbox: exports.durableObject({ storage: "sqlite" }),
+      PortalStore: exports.durableObject({ storage: "sqlite" }),
     },
     },
   };

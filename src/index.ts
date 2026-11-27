@@ -1,3 +1,5 @@
+import { PortalStore } from "../portal/worker.ts";
+export { PortalStore };
 import { guardMcpRequest, protectedResourceMetadata } from "./mcp-oauth.ts";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
@@ -10,6 +12,10 @@ import { agentId, asEnvelope, asIdentity, asInvite, canonicalBytes, CLOCK_SKEW, 
 
 export interface Env {
   RELEASE_SHA: string;
+  PORTAL_STORE?: DurableObjectNamespace<PortalStore>;
+  PORTAL_ORIGIN?: string;
+  GITHUB_CLIENT_ID?: string;
+  GITHUB_CLIENT_SECRET?: string;
   MCP_OAUTH_ISSUER?: string;
   MCP_OAUTH_RESOURCE?: string;
   MCP_OAUTH_JWKS_URI?: string;
@@ -48,6 +54,10 @@ async function signed(publicKey: string, signature: string, message: Uint8Array)
 const worker = {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
+    if (url.pathname.startsWith("/auth/") || url.pathname === "/agents" || ["/pairing/", "/device/", "/copy/"].some(prefix => url.pathname.startsWith(prefix))) {
+      if (url.protocol !== "https:" || !env.PORTAL_STORE || !env.PORTAL_ORIGIN || url.origin !== env.PORTAL_ORIGIN || !env.GITHUB_CLIENT_ID || !env.GITHUB_CLIENT_SECRET) return fail("Owner portal unavailable", 503);
+      return env.PORTAL_STORE.getByName("owner-portal").fetch(request);
+    }
     const oauth = env.MCP_OAUTH_ISSUER && env.MCP_OAUTH_RESOURCE && env.MCP_OAUTH_JWKS_URI
       ? { issuer: env.MCP_OAUTH_ISSUER, resource: env.MCP_OAUTH_RESOURCE, jwksUri: env.MCP_OAUTH_JWKS_URI } : undefined;
     if (url.pathname === "/.well-known/oauth-protected-resource/mcp") {
