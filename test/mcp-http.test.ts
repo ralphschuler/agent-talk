@@ -64,6 +64,9 @@ it("delivers only a mutually approved, signed ciphertext envelope through MCP", 
   const signature = await signRequest(a, "send", timestamp, { envelope });
   const client = new Client({ name: "synthetic-test", version: "1" });
   await client.connect(new StreamableHTTPClientTransport(new URL("https://agent-talk.test/mcp"), { fetch: (input, init) => SELF.fetch(input, init) }));
+  const tampered = { ...envelope, ciphertext: (envelope.ciphertext[0] === "A" ? "B" : "A") + envelope.ciphertext.slice(1) };
+  const rejected = await client.callTool({ name: "relay_send_envelope", arguments: { agentId: a.agentId, timestamp, signature, envelope: tampered } });
+  expect(rejected.isError).toBe(true);
   const result = await client.callTool({ name: "relay_send_envelope", arguments: { agentId: a.agentId, timestamp, signature, envelope } });
   expect(result.isError).not.toBe(true);
   const replay = await client.callTool({ name: "relay_send_envelope", arguments: { agentId: a.agentId, timestamp, signature, envelope } });
