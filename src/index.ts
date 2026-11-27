@@ -48,6 +48,8 @@ const worker = {
       // Browser origins are not supported. The signed operation remains bound to
       // the existing relay authentication, contact and replay checks.
       if (request.headers.has("origin")) return fail("origin not allowed", 403);
+      // Delivery uses the existing authenticated WebSocket, not an idle MCP stream.
+      if (request.method === "GET") return fail("stream not available", 405);
       const server = new McpServer({ name: "agent-talk-ciphertext-relay", version: "0.2.0" });
       server.registerTool("relay_send_envelope", {
         description: "Submit a locally encrypted and signed envelope. Private keys and plaintext stay on the client.",
