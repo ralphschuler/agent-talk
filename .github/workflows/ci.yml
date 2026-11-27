@@ -22,6 +22,7 @@ jobs:
           cache: npm
       - run: npm ci
       - run: node scripts/test-companion-package.mjs
+      - run: node scripts/build-portal.mjs --check
       - run: npm test
       - run: npm run typecheck
       - run: npm run typecheck:adapter
