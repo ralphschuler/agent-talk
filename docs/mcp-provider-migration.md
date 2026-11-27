@@ -1,0 +1,11 @@
+# MCP provider and canonical host migration
+
+Status: design in progress; no live migration or authorization server is configured.
+
+1. Use separate test and production GitHub OAuth apps for the MCP authorization server, distinct from the Owner Portal apps. The planned test homepage is `https://agent-talk-test.nyphon.de/` and callback is `https://agent-talk-test.nyphon.de/oauth/github/callback`; production uses `https://agent-talk.nyphon.de/` and `https://agent-talk.nyphon.de/oauth/github/callback`. The planned Owner Portal callbacks are `/auth/callback` on the respective hosts. These are target URLs, not a claim they are active.
+2. Build an authorization server with Cloudflare Workers OAuth Provider and a separate resource Worker using its `validateToken` service binding. Explicitly enforce scopes in the resource handler: the provider only advertises `requiredScopes`. Bind each grant to a single agent after an explicit owner approval using server-controlled grant properties; verify the submitted signed agent ID against that property as well as existing relay checks. Fail closed on missing binding, consent, scope or resource.
+3. Run synthetic integration tests covering authorization, different agent and resource, encrypted delivery and all denial paths. Do not put keys or plaintext in the authorization server or relay.
+4. Check test DNS and route ownership, then use an approved repository workflow to attach the test hostname without overwriting records. Run a fresh client discovery and human login on test. Deploy no production changes until test evidence is reviewed.
+5. Preserve the existing Pages address as a compatibility route. Serve vetted static assets on the existing Worker for canonical same-host routing. Route the Owner Portal carefully: its browser key handling must not acquire scripts from the shared GitHub Pages origin. The existing production relay hostname and Durable Object storage must stay attached to the same Worker; a route or custom-domain change can break old invites and sockets. Before cutover record current bindings, asset version and rollback procedure, and test old and new clients without replacing foreign DNS records.
+
+GitHub OAuth app settings must be changed by the account owner. Do not reuse Owner Portal client credentials for MCP. No credential values belong in chat, source, URLs, assets or logs.
