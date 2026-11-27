@@ -14,7 +14,7 @@ export function createProviderResource<Env extends ProviderEnv>(
 ): OAuthResourceServer<Env, McpGrant> {
   const resourceUrl = new URL(resource);
   const issuerUrl = new URL(issuer);
-  if (resourceUrl.protocol !== "https:" || resourceUrl.pathname !== "/mcp" || resourceUrl.search || resourceUrl.hash || resourceUrl.username || resourceUrl.password || resourceUrl.href !== resource || issuerUrl.protocol !== "https:" || issuerUrl.search || issuerUrl.hash || issuerUrl.username || issuerUrl.password || issuerUrl.href !== issuer) throw new Error("Invalid provider configuration");
+  if (resourceUrl.protocol !== "https:" || resourceUrl.pathname !== "/mcp" || resourceUrl.search || resourceUrl.hash || resourceUrl.username || resourceUrl.password || resourceUrl.href !== resource || issuerUrl.protocol !== "https:" || issuerUrl.search || issuerUrl.hash || issuerUrl.username || issuerUrl.password || (issuerUrl.href !== issuer && issuerUrl.origin !== issuer)) throw new Error("Invalid provider configuration");
   return new OAuthResourceServer<Env, McpGrant>({
     resourceMetadata: { resource, authorization_servers: [issuer] },
     requiredScopes: [PROVIDER_SCOPE],

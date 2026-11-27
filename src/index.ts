@@ -1,5 +1,6 @@
 import { PortalStore } from "../portal/worker.ts";
 export { PortalStore };
+import { oauthIssuer } from "./oauth-issuer.ts";
 import { createProviderResource, type McpGrant, type ProviderEnv } from "./mcp-provider-resource.ts";
 import type { AuthorizationServerBinding } from "@cloudflare/workers-oauth-provider";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -7,7 +8,7 @@ import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/
 import { z } from "zod";
 import { GroupDelivery } from "./group-relay.ts";
 import { GROUP_REQUEST_LIMIT, groupHttpAction, validGroupRequest } from "./group-protocol.ts";
-import { DurableObject } from "cloudflare:workers";
+import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { authMessage, fromBase64url, inviteMessage, type AgentIdentity, type CipherEnvelope } from "./protocol.ts";
 import { agentId, asEnvelope, asIdentity, asInvite, canonicalBytes, CLOCK_SKEW, DAY, fields, identifier, readJson, record } from "./validation.ts";
 
@@ -20,8 +21,17 @@ export interface Env {
   MCP_OAUTH_ISSUER?: string;
   MCP_OAUTH_RESOURCE?: string;
   AUTH_SERVER?: AuthorizationServerBinding<McpGrant>;
+  OAUTH_KV?: KVNamespace;
   DIRECTORY: DurableObjectNamespace<Directory>;
   MAILBOX: DurableObjectNamespace<Mailbox>;
+}
+
+/** Internal service entrypoint: never exposes an unauthenticated token-validation URL. */
+export class OAuthValidator extends WorkerEntrypoint<Env> {
+  async validateToken(resource: string, token: string) {
+    if (!this.env.PORTAL_ORIGIN || !this.env.OAUTH_KV) throw new Error("OAuth issuer unavailable");
+    return oauthIssuer({ PORTAL_ORIGIN: this.env.PORTAL_ORIGIN, OAUTH_KV: this.env.OAUTH_KV }).validateToken<McpGrant>(resource, token, { PORTAL_ORIGIN: this.env.PORTAL_ORIGIN, OAUTH_KV: this.env.OAUTH_KV });
+  }
 }
 
 const IDENTITY_LIMIT = 512;
@@ -80,7 +90,12 @@ async function serveMcp(request: Request, env: Env, grantedAgentId: string): Pro
 const worker = {
   async fetch(request: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
-    if (url.pathname.startsWith("/auth/") || url.pathname === "/agents" || ["/pairing/", "/device/", "/copy/"].some(prefix => url.pathname.startsWith(prefix))) {
+    if (url.pathname === "/.well-known/oauth-authorization-server" || url.pathname === "/oauth/token" || url.pathname === "/oauth/register") {
+      if (url.protocol !== "https:" || !env.PORTAL_ORIGIN || url.origin !== env.PORTAL_ORIGIN || !env.OAUTH_KV || !ctx) return fail("OAuth issuer unavailable", 503);
+      try { return await oauthIssuer({ PORTAL_ORIGIN: env.PORTAL_ORIGIN, OAUTH_KV: env.OAUTH_KV }).fetch(request, { PORTAL_ORIGIN: env.PORTAL_ORIGIN, OAUTH_KV: env.OAUTH_KV }, ctx); }
+      catch { return fail("OAuth issuer unavailable", 503); }
+    }
+    if (url.pathname === "/authorize" || url.pathname === "/oauth/consent" || url.pathname.startsWith("/auth/") || url.pathname === "/agents" || ["/pairing/", "/device/", "/copy/"].some(prefix => url.pathname.startsWith(prefix))) {
       if (url.protocol !== "https:" || !env.PORTAL_STORE || !env.PORTAL_ORIGIN || url.origin !== env.PORTAL_ORIGIN || !env.GITHUB_CLIENT_ID || !env.GITHUB_CLIENT_SECRET) return fail("Owner portal unavailable", 503);
       return env.PORTAL_STORE.getByName("owner-portal").fetch(request);
     }

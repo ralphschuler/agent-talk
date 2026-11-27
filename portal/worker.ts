@@ -1,4 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
+import { oauthIssuer } from "../src/oauth-issuer.ts";
+import { PROVIDER_SCOPE } from "../src/mcp-provider-resource.ts";
 import { beginAuthorization, exchangeAuthorization } from "../src/github-oauth.ts";
 import { initAuthTransactions, saveAuthTransaction, consumeAuthTransaction } from "../src/auth-transaction.ts";
 import { base64url, type CipherEnvelope } from "../src/protocol.ts";
@@ -13,6 +15,7 @@ interface PortalEnv {
   GITHUB_CLIENT_SECRET: string;
   RELEASE_SHA: string;
   OAUTH_TEST_PROVIDER?: Fetcher;
+  OAUTH_KV?: KVNamespace;
 }
 
 const cookieOptions = "Path=/; Secure; HttpOnly; SameSite=Lax";
@@ -73,6 +76,49 @@ export class PortalStore extends DurableObject<PortalEnv> {
       clientSecret: this.env.GITHUB_CLIENT_SECRET,
       callback: this.env.PORTAL_ORIGIN + "/auth/callback",
     };
+    if (url.pathname === "/authorize" || url.pathname === "/oauth/consent") {
+      if (!this.env.OAUTH_KV) return response({ error: "MCP authorization unavailable" }, 503);
+      const token = cookie(request, "__Host-at_session");
+      if (!/^[A-Za-z0-9_-]{43}$/.test(token)) return response({ error: "Sign in to the owner portal before authorizing an MCP client" }, 401);
+      const session = this.sql.exec<{ account_id: string }>("SELECT account_id FROM sessions WHERE token_hash = ? AND expires > ?", await hash(token), Date.now()).toArray()[0];
+      if (!session) return response({ error: "Unauthorized" }, 401);
+      const oauth = oauthIssuer({ PORTAL_ORIGIN: this.env.PORTAL_ORIGIN, OAUTH_KV: this.env.OAUTH_KV }).getOAuthApi({ PORTAL_ORIGIN: this.env.PORTAL_ORIGIN, OAUTH_KV: this.env.OAUTH_KV });
+      if (url.pathname === "/authorize" && request.method === "GET") {
+        try {
+          const authRequest = await oauth.parseAuthRequest(request);
+          if (authRequest.scope.length !== 1 || authRequest.scope[0] !== PROVIDER_SCOPE) return response({ error: "Invalid scope" }, 400);
+          const description = await oauth.describeConsent(authRequest);
+          const consent = await oauth.beginConsent(authRequest);
+          const agents = this.sql.exec<{ agent_id: string }>("SELECT agent_id FROM agents WHERE account_id = ? ORDER BY agent_id", session.account_id).toArray();
+          const esc = (value: string) => value.replace(/[&<>"']/g, ch => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[ch]!);
+          const options = agents.map(({ agent_id }) => `<option value="${esc(agent_id)}">${esc(agent_id)}</option>`).join("");
+          const headers = new Headers(consent.headers);
+          headers.set("Content-Type", "text/html; charset=utf-8");
+          headers.set("Cache-Control", "no-store");
+          headers.set("Content-Security-Policy", "default-src 'none'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'");
+          return new Response(`<!doctype html><html lang="en"><title>Authorize Agent Talk</title><h1>Authorize agent</h1><p>Client: ${esc(description.clientName)}</p><p>Redirect: ${esc(description.redirectHost)}</p><p>Scope: ${esc(description.scope.join(", "))}</p><form method="post" action="/oauth/consent"><input type="hidden" name="handle" value="${esc(consent.handle)}"><label>Agent <select name="agent" required>${options}</select></label><button name="decision" value="approve">Approve</button><button name="decision" value="deny" formnovalidate>Deny</button></form></html>`, { headers });
+        } catch { return response({ error: "Invalid authorization request" }, 400); }
+      }
+      if (url.pathname === "/oauth/consent" && request.method === "POST") {
+        if (request.headers.get("origin") !== url.origin || request.headers.get("content-type")?.split(";")[0] !== "application/x-www-form-urlencoded") return response({ error: "Invalid origin or content type" }, 403);
+        const length = Number(request.headers.get("content-length"));
+        if (!Number.isSafeInteger(length) || length < 1 || length > 8192) return response({ error: "Invalid request size" }, 400);
+        const text = await request.text();
+        if (new TextEncoder().encode(text).length !== length) return response({ error: "Invalid request size" }, 400);
+        const form = new URLSearchParams(text);
+        if ([...form.keys()].some(key => !["handle", "agent", "decision"].includes(key)) || form.getAll("handle").length !== 1 || form.getAll("decision").length !== 1 || form.getAll("agent").length > 1) return response({ error: "Invalid request" }, 400);
+        const handle = form.get("handle")!, agent = form.get("agent") ?? "", decision = form.get("decision");
+        try {
+          if (decision === "deny") { const denied = await oauth.denyConsent(request, handle); return new Response(null, { status: 303, headers: denied.headers }); }
+          if (decision !== "approve" || !agentId(agent) || !this.sql.exec("SELECT 1 FROM agents WHERE agent_id = ? AND account_id = ?", agent, session.account_id).toArray().length) return response({ error: "Agent is not owned by this account" }, 403);
+          const approved = await oauth.approveConsent(request, handle, { scope: [PROVIDER_SCOPE] });
+          const result = await oauth.completeAuthorization({ request: approved.request, userId: session.account_id, metadata: {}, scope: [PROVIDER_SCOPE], props: { agentId: agent } });
+          const headers = new Headers(approved.headers); headers.set("Location", result.redirectTo); headers.set("Cache-Control", "no-store");
+          return new Response(null, { status: 303, headers });
+        } catch { return response({ error: "Invalid or expired consent" }, 400); }
+      }
+      return response({ error: "Method not allowed" }, 405);
+    }
     if ((url.pathname === "/auth/login" || url.pathname === "/auth/mcp/login") && request.method === "POST") {
       // MCP continuation is unavailable until the issuer is integrated.
       if (url.pathname === "/auth/mcp/login") return response({ error: "MCP authorization unavailable" }, 503);
@@ -92,7 +138,7 @@ export class PortalStore extends DurableObject<PortalEnv> {
       const state = url.searchParams.get("state") ?? "";
       const code = url.searchParams.get("code") ?? "";
       const browserToken = cookie(request, "__Host-at_auth");
-      if (!/^[A-Za-z0-9_-]{43}$/.test(state) || !/^[A-Za-z0-9_-]{43}$/.test(browserToken) || !code || code.length > 2048) {
+      if (url.searchParams.getAll("state").length !== 1 || url.searchParams.getAll("code").length !== 1 || !/^[A-Za-z0-9_-]{43}$/.test(state) || !/^[A-Za-z0-9_-]{43}$/.test(browserToken) || !code || code.length > 2048) {
         return response({ error: "Invalid authorization" }, 400);
       }
       const stateHash = await hash(state);

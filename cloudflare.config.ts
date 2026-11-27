@@ -25,7 +25,7 @@ export default defineConfig(({ mode }) => {
     },
     assets: {
       // Static assets are served before this Worker. Only relay paths execute code.
-      runWorkerFirst: ["/v1/*", "/healthz", "/mcp", "/.well-known/oauth-protected-resource/mcp", "/auth/*", "/agents", "/pairing/*", "/device/*", "/copy/*"],
+      runWorkerFirst: ["/v1/*", "/healthz", "/mcp", "/.well-known/oauth-protected-resource/mcp", "/auth/*", "/.well-known/oauth-authorization-server", "/oauth/*", "/authorize", "/agents", "/pairing/*", "/device/*", "/copy/*"],
     },
     exports: {
       Directory: exports.durableObject({ storage: "sqlite" }),
