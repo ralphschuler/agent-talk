@@ -1,29 +1,23 @@
 import { SELF, env } from "cloudflare:test";
-import { beforeAll, afterAll, expect, it, vi } from "vite-plus/test";
-import { exportJWK, generateKeyPair, SignJWT } from "jose";
+import { beforeAll, expect, it } from "vite-plus/test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 
 const issuer = "https://synthetic-issuer.invalid/";
 const resource = "https://agent-talk.test/mcp";
-let accessToken = "";
-let wrongAudience = "";
-let wrongScope = "";
-beforeAll(async () => {
-  const keys = await generateKeyPair("ES256");
-  const jwk = { ...(await exportJWK(keys.publicKey)), kid: "synthetic", alg: "ES256", use: "sig" };
-  accessToken = await new SignJWT({ scope: "agent-talk:relay" }).setProtectedHeader({ alg: "ES256", kid: "synthetic" }).setIssuer(issuer).setAudience(resource).setSubject("synthetic-owner").setIssuedAt().setExpirationTime("2m").sign(keys.privateKey);
-  wrongAudience = await new SignJWT({ scope: "agent-talk:relay" }).setProtectedHeader({ alg: "ES256", kid: "synthetic" }).setIssuer(issuer).setAudience("https://other.invalid/mcp").setSubject("synthetic-owner").setIssuedAt().setExpirationTime("2m").sign(keys.privateKey);
-  wrongScope = await new SignJWT({ scope: "other" }).setProtectedHeader({ alg: "ES256", kid: "synthetic" }).setIssuer(issuer).setAudience(resource).setSubject("synthetic-owner").setIssuedAt().setExpirationTime("2m").sign(keys.privateKey);
-  Object.assign(env, { MCP_OAUTH_ISSUER: issuer, MCP_OAUTH_RESOURCE: resource, MCP_OAUTH_JWKS_URI: issuer + "jwks" });
-  const original = globalThis.fetch;
-  vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
-    const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
-    if (url === issuer + "jwks") return Response.json({ keys: [jwk] });
-    return original(input, init);
+const accessToken = "synthetic-token";
+const wrongAudience = "wrong-audience";
+const wrongScope = "wrong-scope";
+let grantedAgent = "at1_" + "A".repeat(43);
+beforeAll(() => {
+  Object.assign(env, { MCP_OAUTH_ISSUER: issuer, MCP_OAUTH_RESOURCE: resource,
+    AUTH_SERVER: { async validateToken(audience: string, token: string) {
+      if (audience !== resource || ![accessToken, wrongScope].includes(token)) return null;
+      return { audience, expiresAt: Math.floor(Date.now() / 1000) + 300, userId: "synthetic", clientId: "synthetic",
+        scope: token === wrongScope ? ["other"] : ["agent-talk:relay"], props: { agentId: grantedAgent } };
+    } },
   });
 });
-afterAll(() => vi.unstubAllGlobals());
 const oauthFetch = (input: RequestInfo | URL, init?: RequestInit) => {
   const headers = new Headers(init?.headers);
   headers.set("authorization", "Bearer " + accessToken);
@@ -36,7 +30,7 @@ it("requires OAuth on the real Worker route and publishes discovery metadata", a
   expect(await meta.json()).toMatchObject({ resource, authorization_servers: [issuer], scopes_supported: ["agent-talk:relay"] });
   for (const token of ["", "not-a-token", wrongAudience, wrongScope]) {
     const response = await SELF.fetch(resource, { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream", ...(token ? { authorization: "Bearer " + token } : {}) }, body: "{}" });
-    expect(response.status).toBe(401);
+    expect(response.status).toBe(token === wrongScope ? 403 : 401);
     expect(response.headers.get("www-authenticate")).toContain('resource_metadata="https://agent-talk.test/.well-known/oauth-protected-resource/mcp"');
   }
   expect((await SELF.fetch("http://agent-talk.test/mcp", { method: "POST" })).status).toBe(403);
@@ -71,6 +65,7 @@ it("delivers only a mutually approved, signed ciphertext envelope through MCP", 
   const { env, runInDurableObject } = await import("cloudflare:test");
   const a = await createLocalIdentity();
   const b = await createLocalIdentity();
+  grantedAgent = a.agentId;
   const post = async (identity: typeof a, action: string, payload: unknown) => {
     const timestamp = String(Date.now());
     return SELF.fetch("https://agent-talk.test/v1/" + action, { method: "POST", headers: {
@@ -106,6 +101,10 @@ it("delivers only a mutually approved, signed ciphertext envelope through MCP", 
   const tampered = { ...envelope, ciphertext: (envelope.ciphertext[0] === "A" ? "B" : "A") + envelope.ciphertext.slice(1) };
   const rejected = await client.callTool({ name: "relay_send_envelope", arguments: { agentId: a.agentId, timestamp, signature, envelope: tampered } });
   expect(rejected.isError).toBe(true);
+  grantedAgent = b.agentId;
+  const wrongAgent = await client.callTool({ name: "relay_send_envelope", arguments: { agentId: a.agentId, timestamp, signature, envelope } });
+  expect(wrongAgent.isError).toBe(true);
+  grantedAgent = a.agentId;
   const result = await client.callTool({ name: "relay_send_envelope", arguments: { agentId: a.agentId, timestamp, signature, envelope } });
   expect(result.isError).not.toBe(true);
   const replay = await client.callTool({ name: "relay_send_envelope", arguments: { agentId: a.agentId, timestamp, signature, envelope } });

@@ -1,6 +1,7 @@
 import { PortalStore } from "../portal/worker.ts";
 export { PortalStore };
-import { guardMcpRequest, protectedResourceMetadata } from "./mcp-oauth.ts";
+import { createProviderResource, type McpGrant, type ProviderEnv } from "./mcp-provider-resource.ts";
+import type { AuthorizationServerBinding } from "@cloudflare/workers-oauth-provider";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { z } from "zod";
@@ -18,7 +19,7 @@ export interface Env {
   GITHUB_CLIENT_SECRET?: string;
   MCP_OAUTH_ISSUER?: string;
   MCP_OAUTH_RESOURCE?: string;
-  MCP_OAUTH_JWKS_URI?: string;
+  AUTH_SERVER?: AuthorizationServerBinding<McpGrant>;
   DIRECTORY: DurableObjectNamespace<Directory>;
   MAILBOX: DurableObjectNamespace<Mailbox>;
 }
@@ -51,45 +52,48 @@ async function signed(publicKey: string, signature: string, message: Uint8Array)
   }
 }
 
+async function serveMcp(request: Request, env: Env, grantedAgentId: string): Promise<Response> {
+  const url = new URL(request.url);
+  // Delivery uses the existing authenticated WebSocket, not an idle MCP stream.
+  if (request.method === "GET") return fail("stream not available", 405);
+  const server = new McpServer({ name: "agent-talk-ciphertext-relay", version: "0.2.0" });
+  server.registerTool("relay_send_envelope", {
+    description: "Submit a locally encrypted and signed envelope. Private keys and plaintext stay on the client.",
+    inputSchema: {
+      agentId: z.string().max(64), timestamp: z.string().max(13), signature: z.string().max(86),
+      envelope: z.object({ version: z.number(), id: z.string().max(128), senderId: z.string().max(64),
+    recipientId: z.string().max(64), createdAt: z.number(), enc: z.string().max(64), ciphertext: z.string().max(65000) }).strict(),
+    },
+  }, async ({ agentId: actor, timestamp, signature, envelope }) => {
+    if (actor !== grantedAgentId) return { content: [{ type: "text" as const, text: "Envelope rejected." }], isError: true };
+    const relayRequest = new Request(url.origin + "/v1/send", { method: "POST", headers: {
+      "content-type": "application/json", "x-agent-id": actor, "x-agent-timestamp": timestamp, "x-agent-signature": signature,
+    }, body: JSON.stringify({ envelope }) });
+    const response = await worker.fetch(relayRequest, env);
+    return { content: [{ type: "text" as const, text: response.ok ? "Envelope accepted." : "Envelope rejected (HTTP " + response.status + ")." }], isError: !response.ok };
+  });
+  const transport = new WebStandardStreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true, maxRequestBodySize: 96_000 });
+  await server.connect(transport);
+  return transport.handleRequest(request);
+}
+
 const worker = {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname.startsWith("/auth/") || url.pathname === "/agents" || ["/pairing/", "/device/", "/copy/"].some(prefix => url.pathname.startsWith(prefix))) {
       if (url.protocol !== "https:" || !env.PORTAL_STORE || !env.PORTAL_ORIGIN || url.origin !== env.PORTAL_ORIGIN || !env.GITHUB_CLIENT_ID || !env.GITHUB_CLIENT_SECRET) return fail("Owner portal unavailable", 503);
       return env.PORTAL_STORE.getByName("owner-portal").fetch(request);
     }
-    const oauth = env.MCP_OAUTH_ISSUER && env.MCP_OAUTH_RESOURCE && env.MCP_OAUTH_JWKS_URI
-      ? { issuer: env.MCP_OAUTH_ISSUER, resource: env.MCP_OAUTH_RESOURCE, jwksUri: env.MCP_OAUTH_JWKS_URI } : undefined;
-    if (url.pathname === "/.well-known/oauth-protected-resource/mcp") {
-      if (url.protocol !== "https:" || request.method !== "GET" || !oauth || oauth.resource !== url.origin + "/mcp") return fail("OAuth metadata unavailable", 503);
-      try { return json(protectedResourceMetadata(oauth)); } catch { return fail("OAuth metadata unavailable", 503); }
-    }
-    if (url.pathname === "/mcp") {
-      // Browser origins are not supported. The signed operation remains bound to
-      // the existing relay authentication, contact and replay checks.
-      if (request.headers.has("origin")) return fail("origin not allowed", 403);
-      const denied = await guardMcpRequest(request, oauth);
-      if (denied) return denied;
-      // Delivery uses the existing authenticated WebSocket, not an idle MCP stream.
-      if (request.method === "GET") return fail("stream not available", 405);
-      const server = new McpServer({ name: "agent-talk-ciphertext-relay", version: "0.2.0" });
-      server.registerTool("relay_send_envelope", {
-        description: "Submit a locally encrypted and signed envelope. Private keys and plaintext stay on the client.",
-        inputSchema: {
-          agentId: z.string().max(64), timestamp: z.string().max(13), signature: z.string().max(86),
-          envelope: z.object({ version: z.number(), id: z.string().max(128), senderId: z.string().max(64),
-            recipientId: z.string().max(64), createdAt: z.number(), enc: z.string().max(64), ciphertext: z.string().max(65000) }).strict(),
-        },
-      }, async ({ agentId: actor, timestamp, signature, envelope }) => {
-        const relayRequest = new Request(url.origin + "/v1/send", { method: "POST", headers: {
-          "content-type": "application/json", "x-agent-id": actor, "x-agent-timestamp": timestamp, "x-agent-signature": signature,
-        }, body: JSON.stringify({ envelope }) });
-        const response = await worker.fetch(relayRequest, env);
-        return { content: [{ type: "text" as const, text: response.ok ? "Envelope accepted." : "Envelope rejected (HTTP " + response.status + ")." }], isError: !response.ok };
-      });
-      const transport = new WebStandardStreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true, maxRequestBodySize: 96_000 });
-      await server.connect(transport);
-      return transport.handleRequest(request);
+    if (url.pathname === "/.well-known/oauth-protected-resource/mcp" || url.pathname === "/mcp") {
+      if (url.protocol !== "https:") return fail("HTTPS required", 403);
+      if (url.pathname === "/mcp" && request.headers.has("origin")) return fail("origin not allowed", 403);
+      if (!env.MCP_OAUTH_ISSUER || !env.MCP_OAUTH_RESOURCE || !env.AUTH_SERVER || !ctx || env.MCP_OAUTH_RESOURCE !== url.origin + "/mcp") return fail("OAuth unavailable", 503);
+      const providerEnv = { ...env, AUTH_SERVER: env.AUTH_SERVER };
+      let provider;
+      try {
+        provider = createProviderResource<Env & ProviderEnv>(env.MCP_OAUTH_RESOURCE, env.MCP_OAUTH_ISSUER, serveMcp);
+      } catch { return fail("OAuth unavailable", 503); }
+      return provider.fetch(request, providerEnv, ctx);
     }
     if (url.pathname === "/healthz" && request.method === "GET") return json({ ok: true, protocol: 1, release: env.RELEASE_SHA });
     const action = url.pathname.slice("/v1/".length);
