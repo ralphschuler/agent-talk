@@ -1,0 +1,12 @@
+import assert from 'node:assert/strict';
+const origin = 'https://agent-talk-test.nyphon.de';
+const get = (path, options = {}) => fetch(origin + path, { ...options, redirect:'manual', signal:AbortSignal.timeout(15000) });
+const home = await get('/'); assert.equal(home.status, 200); assert.match(await home.text(), /Agent Talk/);
+const health = await get('/healthz'); assert.equal(health.status, 200);
+assert.match(process.env.EXPECTED_RELEASE ?? '', /^[a-f0-9]{40}$/);
+assert.equal((await health.json()).release, process.env.EXPECTED_RELEASE);
+const meta = await get('/.well-known/oauth-protected-resource/mcp'); assert.equal(meta.status, 200);
+assert.equal((await meta.json()).resource, origin + '/mcp');
+const denied = await get('/mcp', { method:'POST', headers:{'content-type':'application/json',accept:'application/json, text/event-stream'}, body:'{}' });
+assert.equal(denied.status, 401); assert.match(denied.headers.get('www-authenticate') ?? '', /resource_metadata=/);
+console.log('Canonical test landing, health, OAuth discovery and anonymous denial verified.');

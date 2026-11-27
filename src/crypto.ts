@@ -108,3 +108,16 @@ export async function openEnvelope(identity: LocalIdentity, sender: AgentIdentit
   if (text.length === 0 || text.length > MAX_TEXT_LENGTH) throw new Error("Invalid message length.");
   return text;
 }
+
+export async function sealOwnerCopy(identity: LocalIdentity, recipient: AgentIdentity, id: string, content: string): Promise<CipherEnvelope> {
+  const bytes = new TextEncoder().encode(content);
+  if (bytes.length === 0 || bytes.length > 90_000) throw new Error("Invalid owner copy size.");
+  return sealBytes(identity, recipient, id, Date.now(), 1, bytes);
+}
+
+export async function openOwnerCopy(identity: LocalIdentity, sender: AgentIdentity, envelope: CipherEnvelope): Promise<string> {
+  if (envelope.version !== 1) throw new Error("Expected an owner copy envelope.");
+  const bytes = await openBytes(identity, sender, envelope);
+  if (bytes.byteLength === 0 || bytes.byteLength > 90_000) throw new Error("Invalid owner copy size.");
+  return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
+}

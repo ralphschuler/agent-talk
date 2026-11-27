@@ -22,6 +22,7 @@ jobs:
           cache: npm
       - run: npm ci
       - run: node scripts/test-companion-package.mjs
+      - run: node scripts/build-portal.mjs --check
       - run: npm test
       - run: npm run typecheck
       - run: npm run typecheck:adapter
@@ -29,3 +30,8 @@ jobs:
       - run: node scripts/test-local-e2e.mjs
       - run: npm run build
       - run: npx cf build --mode test
+      - name: Dry-run isolated canonical test deployment
+        run: npx cf deploy --dry-run --mode canonical-test
+        env:
+          AGENT_TALK_TEST_OAUTH_KV_ID: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          OWNER_OAUTH_CLIENT_ID: synthetic-client

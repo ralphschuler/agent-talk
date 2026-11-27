@@ -9,7 +9,10 @@ if len(sys.argv) != 2:
     raise SystemExit("Usage: python3 scripts/build-companion.py OUTPUT.tar")
 output = pathlib.Path(sys.argv[1])
 files = [(root / 'distribution/companion' / name, name) for name in ('README.md', 'package.json', 'package-lock.json')]
+files += [(root / 'LICENSE', 'LICENSE'), (root / 'THIRD_PARTY_NOTICES.md', 'THIRD_PARTY_NOTICES.md')]
+files += [(path, str(path.relative_to(root))) for path in sorted((root / 'third_party/licenses').glob('*.txt'))]
 files += [(path, str(path.relative_to(root))) for path in sorted((root / 'adapter').glob('*.ts'))]
+files += [(root / 'portal' / 'pairing.ts', 'portal/pairing.ts')]
 files += [(root / 'src' / (name + '.ts'), 'src/' + name + '.ts') for name in ('auth', 'crypto', 'direct', 'group-protocol', 'protocol', 'validation')]
 with tarfile.open(output, mode='w', format=tarfile.USTAR_FORMAT) as tar:
     for path, name in files:

@@ -1,0 +1,75 @@
+name: Deploy canonical test
+on:
+  workflow_dispatch: {}
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: agent-talk-canonical-test
+  cancel-in-progress: false
+jobs:
+  authorization-gate:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      authorized: ${{ steps.check.outputs.authorized }}
+    steps:
+      - name: Require independently enforced main review and exact Verify
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          protection="$(gh api "repos/$GITHUB_REPOSITORY/branches/main/protection")"
+          jq -e '.required_pull_request_reviews.required_approving_review_count >= 1 and .enforce_admins.enabled == true and (.required_pull_request_reviews.dismiss_stale_reviews == true or .required_pull_request_reviews.require_last_push_approval == true) and ((.required_pull_request_reviews.bypass_pull_request_allowances.users // []) | length == 0) and ((.required_pull_request_reviews.bypass_pull_request_allowances.teams // []) | length == 0) and ((.required_pull_request_reviews.bypass_pull_request_allowances.apps // []) | length == 0)' <<< "$protection" > /dev/null
+          gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml --commit "$GITHUB_SHA" --json conclusion --jq 'any(.[]; .conclusion=="success")' | grep -qx true
+          printf 'authorized=true\n' >> "$GITHUB_OUTPUT"
+  deploy:
+    needs: authorization-gate
+    if: github.ref == 'refs/heads/main' && needs.authorization-gate.outputs.authorized == 'true'
+    environment: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      CF_SEND_TELEMETRY: "false"
+      DO_NOT_TRACK: "1"
+      EXPECTED_RELEASE: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with: {persist-credentials: false}
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with: {node-version: 24, cache: npm}
+      - run: npm ci
+      - name: Prepare isolated resources
+        run: node scripts/canonical-test-infra.mjs prepare
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      - name: Build canonical test Worker
+        run: npx cf build --mode canonical-test
+        env:
+          OWNER_OAUTH_CLIENT_ID: ${{ secrets.OWNER_OAUTH_CLIENT_ID }}
+      - name: Deploy isolated Worker and fresh SQLite classes
+        shell: bash
+        run: |
+          set -euo pipefail
+          node -e 'process.stdout.write(JSON.stringify({GITHUB_CLIENT_SECRET:process.env.OWNER_OAUTH_CLIENT_SECRET}))' | npx cf deploy --prebuilt --mode canonical-test --quiet --secrets-file /dev/stdin --message "$EXPECTED_RELEASE"
+        env:
+          OWNER_OAUTH_CLIENT_ID: ${{ secrets.OWNER_OAUTH_CLIENT_ID }}
+          OWNER_OAUTH_CLIENT_SECRET: ${{ secrets.OWNER_OAUTH_CLIENT_SECRET }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      - name: Attach only the collision-free canonical test hostname
+        run: node scripts/canonical-test-infra.mjs attach
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      - name: Verify test ownership and hostname
+        run: node scripts/canonical-test-infra.mjs verify
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      - name: Verify public HTTPS and closed MCP access
+        run: node scripts/smoke-canonical-test.mjs
