@@ -1,3 +1,6 @@
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
+import { z } from "zod";
 import { GroupDelivery } from "./group-relay.ts";
 import { GROUP_REQUEST_LIMIT, groupHttpAction, validGroupRequest } from "./group-protocol.ts";
 import { DurableObject } from "cloudflare:workers";
@@ -38,9 +41,34 @@ async function signed(publicKey: string, signature: string, message: Uint8Array)
   }
 }
 
-export default {
-  async fetch(request, env): Promise<Response> {
+const worker = {
+  async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
+    if (url.pathname === "/mcp") {
+      // Browser origins are not supported. The signed operation remains bound to
+      // the existing relay authentication, contact and replay checks.
+      if (request.headers.has("origin")) return fail("origin not allowed", 403);
+      // Delivery uses the existing authenticated WebSocket, not an idle MCP stream.
+      if (request.method === "GET") return fail("stream not available", 405);
+      const server = new McpServer({ name: "agent-talk-ciphertext-relay", version: "0.2.0" });
+      server.registerTool("relay_send_envelope", {
+        description: "Submit a locally encrypted and signed envelope. Private keys and plaintext stay on the client.",
+        inputSchema: {
+          agentId: z.string().max(64), timestamp: z.string().max(13), signature: z.string().max(86),
+          envelope: z.object({ version: z.number(), id: z.string().max(128), senderId: z.string().max(64),
+            recipientId: z.string().max(64), createdAt: z.number(), enc: z.string().max(64), ciphertext: z.string().max(65000) }).strict(),
+        },
+      }, async ({ agentId: actor, timestamp, signature, envelope }) => {
+        const relayRequest = new Request(url.origin + "/v1/send", { method: "POST", headers: {
+          "content-type": "application/json", "x-agent-id": actor, "x-agent-timestamp": timestamp, "x-agent-signature": signature,
+        }, body: JSON.stringify({ envelope }) });
+        const response = await worker.fetch(relayRequest, env);
+        return { content: [{ type: "text" as const, text: response.ok ? "Envelope accepted." : "Envelope rejected (HTTP " + response.status + ")." }], isError: !response.ok };
+      });
+      const transport = new WebStandardStreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true, maxRequestBodySize: 96_000 });
+      await server.connect(transport);
+      return transport.handleRequest(request);
+    }
     if (url.pathname === "/healthz" && request.method === "GET") return json({ ok: true, protocol: 1, release: env.RELEASE_SHA });
     const action = url.pathname.slice("/v1/".length);
     const group = ["group/submit","group/sync","group/ack"].includes(action);
@@ -90,6 +118,8 @@ export default {
     return post(env.MAILBOX.getByName(envelope.recipientId), "/enqueue", { envelope });
   },
 } satisfies ExportedHandler<Env>;
+
+export default worker;
 
 export class Directory extends DurableObject<Env> {
   private readonly groups = new GroupDelivery(this.ctx, this.env.MAILBOX);

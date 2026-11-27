@@ -21,6 +21,7 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
+      - run: node scripts/test-companion-package.mjs
       - run: npm test
       - run: npm run typecheck
       - run: npm run typecheck:adapter
