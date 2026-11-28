@@ -14,19 +14,22 @@ const rules = [
   {type:'copilot_code_review',ruleset_source_type:'Repository',ruleset_source:repository,ruleset_id:28248984,parameters:{review_on_push:true}}
 ];
 const pulls = [{number:2,state:'closed',merged_at:'2026-11-27T19:01:51Z',merge_commit_sha:sha,base:{ref:'main'}}];
-const runs = [{workflowName:'Verify',headSha:sha,status:'completed',conclusion:'success'}];
-const input = {repository,ref:'refs/heads/main',sha,event:'workflow_dispatch',actor:'ralphschuler',triggeringActor:'ralphschuler',rules,pulls,runs};
+const currentMain = {sha};
+const runs = [{workflowName:'Verify',event:'push',headBranch:'main',headSha:sha,status:'completed',conclusion:'success'}];
+const input = {repository,ref:'refs/heads/main',sha,event:'workflow_dispatch',actor:'ralphschuler',triggeringActor:'ralphschuler',currentMain,rules,pulls,runs};
 
 test('authorizes the owner-initiated test release under the active repository rules and exact Verify evidence', () => {
   assert.deepEqual(authorizeCanonicalTest(input), {authorized:true,reason:'owner-authorized-active-rules-and-verify',reviewRequirement:'not-required-by-active-rules'});
 });
 
-test('fails closed for non-owner or rerun actor, malformed rule evidence, unrelated merged PR, and absent Verify', () => {
+test('fails closed for stale main, non-owner or rerun actor, malformed rule evidence, unrelated merged PR, and absent Verify', () => {
+  assert.throws(() => authorizeCanonicalTest({...input,currentMain:{sha:'b'.repeat(40)}}), /current main/i);
   assert.throws(() => authorizeCanonicalTest({...input,actor:'other'}), /owner/i);
   assert.throws(() => authorizeCanonicalTest({...input,triggeringActor:'other'}), /owner/i);
   assert.throws(() => authorizeCanonicalTest({...input,rules:rules.filter(rule => rule.type !== 'pull_request')}), /ruleset/i);
   assert.throws(() => authorizeCanonicalTest({...input,pulls:[{...pulls[0],merge_commit_sha:'b'.repeat(40)}]}), /merged pull request/i);
   assert.throws(() => authorizeCanonicalTest({...input,runs:[{...runs[0],conclusion:'failure'}]}), /Verify/i);
+  assert.throws(() => authorizeCanonicalTest({...input,runs:[{...runs[0],event:'pull_request'}]}), /Verify/i);
 });
 
 test('does not treat zero required approvals as independent review evidence', () => {
