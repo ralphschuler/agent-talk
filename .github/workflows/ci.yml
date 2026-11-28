@@ -21,6 +21,7 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
+      - run: node --test test/node/canonical-test-authorization.mjs
       - run: node scripts/test-companion-package.mjs
       - run: node scripts/build-portal.mjs --check
       - run: npm test
