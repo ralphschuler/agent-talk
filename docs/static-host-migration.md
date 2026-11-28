@@ -25,3 +25,21 @@ The draft adds a manually dispatched `deploy-canonical-test.yml` workflow for th
 **This workflow is not itself an independent security boundary while `main` is unprotected:** a writer could change or remove its checks. Before activation, an administrator must independently enforce reviewed changes to the workflow and main branch; the workflow's check fails closed under the currently observed settings. Do not rely on a successful check in a mutable workflow as proof of that enforcement. The GitHub token must be able to read branch protection; otherwise the check fails before environment secrets are available. Changing repository rules or plan is outside this change.
 
 The workflow is preparatory and has not been dispatched. Its public smoke covers only the landing page, health, OAuth discovery and anonymous MCP denial. A real owner login, Portal browser pairing, encrypted roundtrip, TLS/domain readiness, storage isolation and access review are separate required gates. DNS collision checks are repeated before attaching the test-only hostname; production and the existing workers.dev test hostname are not modified. If domain attachment, KV permissions, or create-only Worker reservation fails, stop without retrying against another resource.
+
+## Canonical test activation follow-up (2026-11-28)
+
+The canonical-test workflow intentionally fails before it can access the `test` environment when it cannot prove both of these facts for the exact `main` commit:
+
+1. `Verify` completed successfully for that commit.
+2. `main` is independently protected by an eligible pull-request review policy (at least one approval, administrator enforcement, stale-review dismissal or last-push approval, and no review-bypass allowances).
+
+The workflow currently declares only `contents: read` and `actions: read`. GitHub's `GET /repos/{owner}/{repo}/branches/{branch}/protection` endpoint requires `Administration: read`, so the workflow's `GITHUB_TOKEN` cannot read the policy and the authorization job fails closed. A check in this mutable workflow cannot replace repository-side review enforcement: a writer could change the check or the checkout before protected credentials are exposed.
+
+This is a release blocker, not a deployment authorization. The deploy-relevant change set is immutable at [PR #2's base-to-merge comparison](https://github.com/ralphschuler/agent-talk/compare/b5d0a76281ae078e7d2d6d6e15773360360d9e9c...78e8f7694b2c157613a0fd8eb81105f4bcdd7ecc), including the merged release commit `78e8f7694b2c157613a0fd8eb81105f4bcdd7ecc`. Merging PR #2 by its owner is not evidence of an eligible independent review of that exact release.
+
+An administrator must make and independently verify one of these least-privilege choices before dispatching the workflow:
+
+1. Configure a repository ruleset or classic `main` branch protection with the policy above, without bypass actors, and keep workflow changes subject to that policy. This is the preferred independent boundary. Then grant the workflow token only the repository permission needed to read the configured policy, if GitHub permits it for this workflow.
+2. If that read permission is unavailable to `GITHUB_TOKEN`, install a narrowly scoped GitHub App or use a fine-grained token restricted to this repository with `Administration: read` only. Store it as an environment secret and use it only for the read-only policy query; it must not have contents write, actions write, workflow write, or administration write.
+
+Before activation, an administrator should verify the configured policy in the repository settings (or with an `Administration: read` token), confirm that the exact `main` SHA is `78e8f7694b2c157613a0fd8eb81105f4bcdd7ecc` or a later separately reviewed release, inspect the linked comparison and the final review state, and confirm a successful `Verify` run for that SHA. The canonical workflow must still reject any failed or missing check. No repository setting, permission, environment secret, workflow dispatch, test deployment, or production deployment is changed by this documentation update; it does not unlock deployment.
