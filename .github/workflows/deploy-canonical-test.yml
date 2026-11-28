@@ -25,10 +25,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          gh api -H 'Accept: application/vnd.github+json' "repos/$GITHUB_REPOSITORY/commits/main" > "$RUNNER_TEMP/canonical-main.json"
           gh api -H 'Accept: application/vnd.github+json' "repos/$GITHUB_REPOSITORY/rules/branches/main" > "$RUNNER_TEMP/canonical-rules.json"
           gh api -H 'Accept: application/vnd.github+json' "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/pulls" > "$RUNNER_TEMP/canonical-pulls.json"
-          gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml --commit "$GITHUB_SHA" --limit 100 --json workflowName,headSha,status,conclusion > "$RUNNER_TEMP/canonical-runs.json"
-          node scripts/canonical-test-authorization.mjs "$RUNNER_TEMP/canonical-rules.json" "$RUNNER_TEMP/canonical-pulls.json" "$RUNNER_TEMP/canonical-runs.json"
+          gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml --commit "$GITHUB_SHA" --limit 100 --json workflowName,event,headBranch,headSha,status,conclusion > "$RUNNER_TEMP/canonical-runs.json"
+          node scripts/canonical-test-authorization.mjs "$RUNNER_TEMP/canonical-main.json" "$RUNNER_TEMP/canonical-rules.json" "$RUNNER_TEMP/canonical-pulls.json" "$RUNNER_TEMP/canonical-runs.json"
           printf 'authorized=true\n' >> "$GITHUB_OUTPUT"
   deploy:
     needs: authorization-gate
@@ -42,7 +43,16 @@ jobs:
       EXPECTED_RELEASE: ${{ github.sha }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with: {persist-credentials: false}
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - name: Confirm release remains current main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh api -H 'Accept: application/vnd.github+json' "repos/$GITHUB_REPOSITORY/commits/main" --jq .sha | grep -Fx "$EXPECTED_RELEASE"
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with: {node-version: 24, cache: npm}
       - run: npm ci
