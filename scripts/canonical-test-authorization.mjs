@@ -31,19 +31,21 @@ function activeRepositoryRuleset(rules, repository) {
   assert.fail('Required active repository ruleset evidence is missing or malformed');
 }
 
-export function authorizeCanonicalTest({ repository, ref, sha, event, actor, triggeringActor, rules, pulls, runs }) {
+export function authorizeCanonicalTest({ repository, ref, sha, event, actor, triggeringActor, currentMain, rules, pulls, runs }) {
   assert.equal(repository, REPOSITORY, 'Canonical deployment is limited to its repository');
   assert.equal(ref, 'refs/heads/main', 'Canonical deployment requires main');
   assert.match(sha ?? '', /^[a-f0-9]{40}$/i, 'Canonical deployment requires an exact commit SHA');
   assert.equal(event, 'workflow_dispatch', 'Canonical deployment requires manual dispatch');
   assert.equal(actor, OWNER, 'Canonical deployment requires the repository owner to initiate it');
   assert.equal(triggeringActor, OWNER, 'Canonical deployment requires the repository owner to initiate any rerun');
+  assert.match(currentMain?.sha ?? '', /^[a-f0-9]{40}$/i, 'Malformed current main tip evidence');
+  assert.equal(currentMain.sha, sha, 'Release is not the current main tip');
 
   const approvals = activeRepositoryRuleset(rules, repository);
   assert.ok(Array.isArray(pulls), 'Malformed merged pull request evidence');
   assert.ok(pulls.some(pull => pull && pull.state === 'closed' && typeof pull.merged_at === 'string' && pull.merged_at.length > 0 && pull.merge_commit_sha === sha && pull.base?.ref === 'main'), 'Exact main SHA is not associated with a merged pull request');
   assert.ok(Array.isArray(runs), 'Malformed Verify run evidence');
-  assert.ok(runs.some(run => run && run.workflowName === 'Verify' && run.headSha === sha && run.status === 'completed' && run.conclusion === 'success'), 'Exact successful Verify run is required');
+  assert.ok(runs.some(run => run && run.workflowName === 'Verify' && run.event === 'push' && run.headBranch === 'main' && run.headSha === sha && run.status === 'completed' && run.conclusion === 'success'), 'Exact successful Verify push to main is required');
   return {
     authorized: true,
     reason: 'owner-authorized-active-rules-and-verify',
@@ -52,7 +54,7 @@ export function authorizeCanonicalTest({ repository, ref, sha, event, actor, tri
 }
 
 async function run(paths, env = process.env) {
-  assert.equal(paths.length, 3, 'Expected rules, pull-request, and workflow-run evidence paths');
+  assert.equal(paths.length, 4, 'Expected current-main, rules, pull-request, and workflow-run evidence paths');
   const evidence = await Promise.all(paths.map(async path => JSON.parse(await readFile(path, 'utf8'))));
   const result = authorizeCanonicalTest({
     repository: env.GITHUB_REPOSITORY,
@@ -61,9 +63,10 @@ async function run(paths, env = process.env) {
     event: env.GITHUB_EVENT_NAME,
     actor: env.GITHUB_ACTOR,
     triggeringActor: env.GITHUB_TRIGGERING_ACTOR,
-    rules: evidence[0],
-    pulls: evidence[1],
-    runs: evidence[2]
+    currentMain: evidence[0],
+    rules: evidence[1],
+    pulls: evidence[2],
+    runs: evidence[3]
   });
   console.log(`Canonical test authorization passed (${result.reason}; ${result.reviewRequirement}).`);
 }
